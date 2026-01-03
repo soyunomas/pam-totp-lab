@@ -1,3 +1,12 @@
+/*
+ * AUDITORÍA DE SEGURIDAD - CÓDIGO CRÍTICO
+ * Módulo PAM TOTP con Estrategia "Sandwich" (Token Split)
+ * 
+ * Corrección aplicada: Inicialización de variables de tamaño para evitar UB.
+ * Reglas aplicadas: MISRA-C / CERT C Secure Coding
+ * Principios: Fail-Safe, Least Privilege, Defense in Depth
+ */
+
 #define _GNU_SOURCE 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +23,7 @@
 #include <errno.h>
 #include <limits.h>     
 #include <sys/prctl.h>  
+#include <stdint.h>
 
 /* Cabeceras de PAM */
 #include <security/pam_modules.h>
@@ -22,48 +32,77 @@
 /* Cabecera para TOTP (liboath) */
 #include <liboath/oath.h>
 
+/* CONSTANTES DE SEGURIDAD */
 #define SECRET_FILE ".google_authenticator"
-#define MIN_SECRET_LEN 16  /* Mínima longitud segura para Base32 */
-#define MAX_SECRET_LEN 128 /* Límite razonable */
+#define MIN_SECRET_LEN 16
+#define MAX_SECRET_LEN 128
+#define TOTP_WINDOW    30  /* Ventana de tiempo (segundos) */
 
-/* REGLA 14: Limpieza segura garantizada */
-void explicit_memzero(void *s, size_t n) {
+/* Configuración "Frankenstein" (Sandwich) */
+#define TOTP_PREFIX_LEN 3
+#define TOTP_SUFFIX_LEN 3
+#define TOTP_FULL_LEN   (TOTP_PREFIX_LEN + TOTP_SUFFIX_LEN)
+
+/* =========================================================================
+ * FUNCIONES AUXILIARES DE SEGURIDAD (HARDENED)
+ * ========================================================================= */
+
+/* REGLA 14: Limpieza segura de memoria (Anti-Optimizaciones) */
+static void secure_memzero(void *s, size_t n) {
+    if (!s || n == 0) return;
 #ifdef HAVE_EXPLICIT_BZERO
     explicit_bzero(s, n);
 #else
-    volatile char *p = s;
+    volatile unsigned char *p = (volatile unsigned char *)s;
     while (n--) *p++ = 0;
-    __asm__ __volatile__("" : : "r"(s) : "memory"); 
+    __asm__ __volatile__("" : : "r"(s) : "memory");
 #endif
 }
 
-/* Helper seguro con validación estricta de FS (File System) */
-int get_user_secret(const char *username, char *secret_buf, size_t buf_size) {
+/* REGLA 10: Wrapper seguro para free */
+static void secure_free(void **ptr, size_t size) {
+    if (ptr && *ptr) {
+        /* REGLA 9: Use-After-Free prevention */
+        if (size > 0) secure_memzero(*ptr, size);
+        free(*ptr);
+        *ptr = NULL;
+    }
+}
+
+/* =========================================================================
+ * LÓGICA DE RECUPERACIÓN DE SECRETOS (PRIVILEGE SEPARATION)
+ * ========================================================================= */
+
+static int get_user_secret(const char *username, char *secret_buf, size_t buf_size) {
+    int retval = -1;
     long bufsize_pwd = sysconf(_SC_GETPW_R_SIZE_MAX);
     if (bufsize_pwd == -1) bufsize_pwd = 16384;
 
-    char *buf_pwd = malloc(bufsize_pwd);
+    /* REGLA 2: Verificación estricta de malloc */
+    char *buf_pwd = malloc((size_t)bufsize_pwd);
     if (!buf_pwd) return -1;
 
     struct passwd pwd;
     struct passwd *result = NULL;
     
-    // REGLA 18: Thread Safe getpwnam_r
-    int s = getpwnam_r(username, &pwd, buf_pwd, bufsize_pwd, &result);
-    if (result == NULL || s != 0) {
-        free(buf_pwd);
+    /* REGLA 3: Inicialización a cero */
+    memset(&pwd, 0, sizeof(pwd));
+
+    /* REGLA 18: getpwnam_r es Thread Safe (getpwnam no lo es) */
+    if (getpwnam_r(username, &pwd, buf_pwd, (size_t)bufsize_pwd, &result) != 0 || result == NULL) {
+        secure_free((void**)&buf_pwd, 0);
         return -1;
     }
 
     char filepath[PATH_MAX];
-    // REGLA 1: Check truncation
-    int printed = snprintf(filepath, sizeof(filepath), "%s/%s", pwd.pw_dir, SECRET_FILE);
-    if (printed < 0 || (size_t)printed >= sizeof(filepath)) {
-        free(buf_pwd);
+    /* REGLA 1: Detección de truncamiento en rutas */
+    if (snprintf(filepath, sizeof(filepath), "%s/%s", pwd.pw_dir, SECRET_FILE) >= (int)sizeof(filepath)) {
+        syslog(LOG_ERR, "PAM-TOTP: Path truncation detected for user %s", username);
+        secure_free((void**)&buf_pwd, 0);
         return -1;
     }
 
-    /* 1. GUARDAR ESTADO ORIGINAL */
+    /* 1. GUARDAR ESTADO DE PRIVILEGIOS ORIGINAL */
     uid_t old_uid = geteuid();
     gid_t old_gid = getegid();
     
@@ -71,229 +110,274 @@ int get_user_secret(const char *username, char *secret_buf, size_t buf_size) {
     gid_t *original_groups = NULL;
     
     if (original_ngroups > 0) {
-        original_groups = malloc(original_ngroups * sizeof(gid_t));
+        original_groups = malloc((size_t)original_ngroups * sizeof(gid_t));
         if (!original_groups) {
-            free(buf_pwd);
+            secure_free((void**)&buf_pwd, 0);
             return -1; 
         }
         if (getgroups(original_ngroups, original_groups) == -1) {
-            free(buf_pwd);
+            secure_free((void**)&buf_pwd, 0);
             free(original_groups);
             return -1;
         }
     }
 
-    /* 2. DROP PRIVILEGES (User + Groups) */
+    /* 2. DROP PRIVILEGES (PRINCIPIO DE MÍNIMO PRIVILEGIO) */
+    /* Es vital cambiar grupos antes que usuario */
     if (initgroups(username, pwd.pw_gid) != 0 ||
         setegid(pwd.pw_gid) != 0 ||
         seteuid(pwd.pw_uid) != 0) {
-        free(buf_pwd);
+        
+        secure_free((void**)&buf_pwd, 0);
         if (original_groups) free(original_groups);
         return -1;
     }
 
-    /* 3. OPERACIÓN CRÍTICA (Lectura con validación de metadatos) */
+    /* 3. LECTURA SEGURA (RACE CONDITION FREE) */
+    /* REGLA 12: O_NOFOLLOW evita ataques de symlink */
     int fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     FILE *fp = NULL;
-    int valid_file = 0;
 
     if (fd != -1) {
         struct stat st;
-        // VALIDACIÓN DE SEGURIDAD DEL FICHERO
+        /* REGLA 8: Validación completa ("Check every access") */
         if (fstat(fd, &st) == 0) {
-            // 1. Debe ser fichero regular
-            // 2. Debe pertenecer al usuario
-            // 3. Permisos estrictos (0600 o 0400 -> grupo/otros deben ser 0)
+            /* - Es fichero regular
+             * - Pertenece al usuario correcto
+             * - Permisos 0600 o 0400 (nadie más puede leer) */
             if (S_ISREG(st.st_mode) && 
                 st.st_uid == pwd.pw_uid && 
                 (st.st_mode & 0077) == 0) { 
                 
                 fp = fdopen(fd, "r");
-                if (fp) valid_file = 1;
+                /* Si fdopen falla, cerramos fd manual */
+                if (!fp) close(fd);
             } else {
-                syslog(LOG_WARNING, "PAM-TOTP: Ignored unsafe secret file for %s (bad mode/owner)", username);
+                syslog(LOG_WARNING, "PAM-TOTP: Insecure file permissions for %s. Ignoring.", username);
+                close(fd); /* Fail-Safe */
             }
-        }
-        
-        if (!valid_file) {
-            close(fd); 
-            fp = NULL;
+        } else {
+            close(fd);
         }
     }
 
-    /* 4. RESTORE PRIVILEGES */
+    /* 4. RESTAURAR PRIVILEGIOS (CRÍTICO) */
+    /* Si fallamos al restaurar root, debemos MATAR el proceso.
+       No podemos dejar que PAM continúe con identidad incorrecta. */
+    
     if (seteuid(old_uid) != 0) {
-        syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore EUID. Aborting.");
+        syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore EUID. Aborting execution.");
         if (fp) fclose(fp);
-        prctl(PR_SET_DUMPABLE, 0); 
-        abort(); 
+        abort(); /* PRINCIPIO 2: Fail-Safe / Fail-Close */
     }
 
     if (setegid(old_gid) != 0) {
-         syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore EGID.");
-         prctl(PR_SET_DUMPABLE, 0);
+         syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore EGID. Aborting execution.");
+         if (fp) fclose(fp);
          abort();
     }
 
     if (original_ngroups > 0 && original_groups) {
         if (setgroups(original_ngroups, original_groups) != 0) {
-            syslog(LOG_ERR, "PAM-TOTP: Failed to restore original groups.");
+            syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore groups. Aborting execution.");
+            if (fp) fclose(fp);
+            abort();
         }
     } else {
+        /* Si no había grupos extra, limpiamos los del usuario */
         setgroups(0, NULL); 
     }
 
-    free(buf_pwd);
+    /* Limpieza de recursos auxiliares */
+    secure_free((void**)&buf_pwd, 0);
     if (original_groups) free(original_groups);
 
-    if (!fp) return -1;
+    /* Procesar contenido del fichero */
+    if (fp) {
+        if (fgets(secret_buf, (int)buf_size, fp) != NULL) {
+            size_t len = strnlen(secret_buf, buf_size);
+            
+            /* Trim de espacios y saltos de línea */
+            while(len > 0 && (secret_buf[len-1] == '\n' || secret_buf[len-1] == '\r' || isspace((unsigned char)secret_buf[len-1]))) {
+                secret_buf[len-1] = '\0';
+                len--;
+            }
 
-    if (fgets(secret_buf, buf_size, fp) == NULL) {
+            /* REGLA 26: Validación de Input (Longitud) */
+            if (len >= MIN_SECRET_LEN && len <= MAX_SECRET_LEN) {
+                retval = 0; /* ÉXITO */
+            } else {
+                syslog(LOG_WARNING, "PAM-TOTP: Invalid secret length for %s", username);
+                secure_memzero(secret_buf, buf_size); /* Borrar datos corruptos */
+            }
+        }
         fclose(fp);
-        return -1;
-    }
-    fclose(fp);
-
-    size_t len = strnlen(secret_buf, buf_size);
-    // Limpieza de espacios y saltos de línea
-    while(len > 0 && (secret_buf[len-1] == '\n' || secret_buf[len-1] == '\r' || isspace((unsigned char)secret_buf[len-1]))) {
-        secret_buf[len-1] = '\0';
-        len--;
     }
 
-    // VALIDACIÓN EXTRA: Longitud del secreto (Recomendación de tu amigo)
-    if (len < MIN_SECRET_LEN || len > MAX_SECRET_LEN) {
-        syslog(LOG_WARNING, "PAM-TOTP: Invalid secret length for %s", username);
-        explicit_memzero(secret_buf, buf_size);
-        return -1;
+    /* En caso de error general, asegurar buffer limpio */
+    if (retval != 0) {
+        secure_memzero(secret_buf, buf_size);
     }
     
-    return 0;
+    return retval;
 }
+
+/* =========================================================================
+ * MÓDULO PAM PRINCIPAL (LÓGICA SANDWICH)
+ * ========================================================================= */
 
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
     (void)flags; (void)argc; (void)argv;
 
-    const char *username;
-    const char *pam_pass = NULL; 
-    char *prompt_resp = NULL;    
+    const char *username = NULL;
     const char *input_pass = NULL; 
+    char *prompt_resp = NULL;    
     
+    /* Buffers estáticos (stack) inicializados a 0 */
     char secret_base32[256] = {0};
-    int retval;
+    
+    /* Punteros dinámicos para gestión de memoria manual */
+    char *secret_binary = NULL; 
+    char *clean_pass = NULL;
+    
+    /* REGLA 3: Inicialización TEMPRANA para evitar uninitialized warnings en cleanup */
+    size_t clean_len = 0;
+    size_t secret_binary_len = 0;
+    
+    int retval = PAM_AUTH_ERR;
 
-    retval = pam_get_user(pamh, &username, NULL);
-    if (retval != PAM_SUCCESS || username == NULL) {
+    /* 1. OBTENER USUARIO */
+    if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || username == NULL) {
         return PAM_AUTH_ERR;
     }
 
+    /* 2. OBTENER SECRETO (FAIL-CLOSE) */
     if (get_user_secret(username, secret_base32, sizeof(secret_base32)) != 0) {
-        // Fail-close: Si el archivo es inseguro o no existe, ignoramos.
         return PAM_IGNORE; 
     }
 
-    retval = pam_get_item(pamh, PAM_AUTHTOK, (const void **)&pam_pass);
+    /* 3. OBTENER INPUT (PASSWORD + SANDWICH TOTP) */
+    retval = pam_get_item(pamh, PAM_AUTHTOK, (const void **)&input_pass);
     
-    if (retval != PAM_SUCCESS || pam_pass == NULL || strlen(pam_pass) == 0) {
+    /* Si no hay password previo, preguntamos */
+    if (retval != PAM_SUCCESS || input_pass == NULL || input_pass[0] == '\0') {
+        /* PRINCIPIO 9: Least Astonishment (Aunque el diseño sea raro, el prompt debe ser claro) */
         retval = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &prompt_resp, "Password: ");
         if (retval != PAM_SUCCESS || prompt_resp == NULL) {
-            explicit_memzero(secret_base32, sizeof(secret_base32));
-            return PAM_AUTH_ERR;
+            goto cleanup;
         }
-        pam_set_item(pamh, PAM_AUTHTOK, prompt_resp);
         input_pass = prompt_resp; 
-    } else {
-        input_pass = pam_pass;
     }
 
-    if (!input_pass) {
-        explicit_memzero(secret_base32, sizeof(secret_base32));
-        if (prompt_resp) {
-            explicit_memzero(prompt_resp, strlen(prompt_resp));
-            free(prompt_resp);
-        }
-        return PAM_AUTH_ERR;
+    size_t total_len = strlen(input_pass);
+
+    /* REGLA 4: Integer Overflow/Underflow Prevention */
+    /* Necesitamos al menos 3 (pre) + 1 (pass) + 3 (suf) = 7 caracteres */
+    if (total_len < (TOTP_FULL_LEN + 1)) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
     }
 
-    size_t pass_len = strlen(input_pass);
-    if (pass_len < 7) { 
-        explicit_memzero(secret_base32, sizeof(secret_base32));
-        if (prompt_resp) {
-            explicit_memzero(prompt_resp, pass_len);
-            free(prompt_resp);
-        }
-        return PAM_AUTH_ERR;
-    }
+    /* 4. DISECCIÓN SEGURA DEL TOKEN (SANDWICH STRATEGY) */
+    /* Buffer para recomponer el token de 6 dígitos */
+    char token_str[TOTP_FULL_LEN + 1] = {0};
 
-    char prefix[4] = {0};
-    char suffix[4] = {0};
-    char token_str[7] = {0}; 
+    /* A. Copiar Prefijo (primeros 3) */
+    /* REGLA 1: Uso de memcpy controlado por constantes */
+    memcpy(token_str, input_pass, TOTP_PREFIX_LEN);
+
+    /* B. Copiar Sufijo (últimos 3) */
+    /* Cálculo de puntero seguro: base + total - 3 */
+    const char *suffix_ptr = input_pass + (total_len - TOTP_SUFFIX_LEN);
+    memcpy(token_str + TOTP_PREFIX_LEN, suffix_ptr, TOTP_SUFFIX_LEN);
     
-    strncpy(prefix, input_pass, 3);
-    strncpy(suffix, input_pass + pass_len - 3, 3);
-    snprintf(token_str, sizeof(token_str), "%s%s", prefix, suffix);
+    token_str[TOTP_FULL_LEN] = '\0'; /* Garantía de Nulo */
 
-    char *secret_binary = NULL; 
-    size_t secret_binary_len = 0;
-    
+    /* REGLA 26: Validación de contenido (Whitelisting de dígitos) */
+    for (int i = 0; i < TOTP_FULL_LEN; i++) {
+        if (!isdigit((unsigned char)token_str[i])) {
+            retval = PAM_AUTH_ERR;
+            goto cleanup;
+        }
+    }
+
+    /* 5. DECODIFICACIÓN Y VALIDACIÓN CRIPTOGRÁFICA */
     int rc = oath_base32_decode(secret_base32, strlen(secret_base32), &secret_binary, &secret_binary_len);
-    explicit_memzero(secret_base32, sizeof(secret_base32)); 
+    
+    /* Ya no necesitamos el base32, borrar inmediatamente */
+    secure_memzero(secret_base32, sizeof(secret_base32)); 
 
     if (rc != OATH_OK) {
-        if (prompt_resp) {
-            explicit_memzero(prompt_resp, pass_len);
-            free(prompt_resp);
-        }
-        return PAM_AUTH_ERR;
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
     }
 
     time_t now = time(NULL);
+    /* Validar TOTP: ventana de +/- 1 paso (30s) */
     rc = oath_totp_validate3(secret_binary, secret_binary_len, 
-                             now, 30, 0, 1, 
-                             NULL, NULL, token_str);
+                             now, TOTP_WINDOW, 
+                             0, /* start offset time */ 
+                             1, /* window size steps */
+                             NULL, NULL, 
+                             token_str);
     
-    if (secret_binary) {
-        explicit_memzero(secret_binary, secret_binary_len);
-        free(secret_binary);
-    }
-
-    explicit_memzero(token_str, sizeof(token_str));
+    /* Borrar secreto binario y token reconstruido de RAM */
+    secure_free((void**)&secret_binary, secret_binary_len);
+    secure_memzero(token_str, sizeof(token_str));
 
     if (rc != OATH_OK) {
-        if (prompt_resp) {
-            explicit_memzero(prompt_resp, pass_len);
-            free(prompt_resp);
-        }
-        return PAM_AUTH_ERR;
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
     }
 
-    size_t clean_len = pass_len - 6;
-    char *clean_pass = malloc(clean_len + 1);
+    /* 6. EXTRACCIÓN DEL PASSWORD REAL (CLEAN PASS) */
+    /* Longitud del pass = Total - 6 */
+    clean_len = total_len - TOTP_FULL_LEN;
+    
+    /* REGLA 2: Check malloc */
+    clean_pass = malloc(clean_len + 1);
     if (!clean_pass) {
-        if (prompt_resp) {
-            explicit_memzero(prompt_resp, pass_len);
-            free(prompt_resp);
-        }
-        return PAM_BUF_ERR;
+        retval = PAM_BUF_ERR;
+        goto cleanup;
     }
 
-    memcpy(clean_pass, input_pass + 3, clean_len);
+    /* Copiar parte central: desde offset 3, longitud calculada */
+    memcpy(clean_pass, input_pass + TOTP_PREFIX_LEN, clean_len);
     clean_pass[clean_len] = '\0';
 
+    /* 7. ACTUALIZAR PILA PAM */
     retval = pam_set_item(pamh, PAM_AUTHTOK, clean_pass);
     
-    explicit_memzero(clean_pass, clean_len);
-    free(clean_pass);
-
-    if (prompt_resp) {
-        explicit_memzero(prompt_resp, pass_len);
-        free(prompt_resp);
+    /* Si falla set_item, es un error crítico de la librería PAM */
+    if (retval != PAM_SUCCESS) {
+        goto cleanup;
     }
 
-    return (retval == PAM_SUCCESS) ? PAM_SUCCESS : PAM_AUTH_ERR;
+    /* Éxito total */
+    retval = PAM_SUCCESS;
+
+cleanup:
+    /* REGLA 14 & 10: Limpieza final centralizada */
+    /* Borrar todos los rastros de la memoria antes de retornar */
+    
+    secure_memzero(secret_base32, sizeof(secret_base32));
+    secure_memzero(token_str, sizeof(token_str));
+    
+    if (secret_binary) secure_free((void**)&secret_binary, secret_binary_len);
+    
+    /* clean_len siempre vale 0 o la longitud correcta, seguro de usar aquí */
+    if (clean_pass) secure_free((void**)&clean_pass, clean_len);
+    
+    /* Si usamos prompt_resp (memoria asignada por PAM/malloc), debemos borrarla */
+    if (prompt_resp) {
+        secure_free((void**)&prompt_resp, strlen(prompt_resp));
+    }
+
+    return retval;
 }
 
 PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char **argv) {
     (void)pamh; (void)flags; (void)argc; (void)argv;
+    /* PAM_SUCCESS es el default seguro para setcred si no hacemos nada */
     return PAM_SUCCESS;
 }

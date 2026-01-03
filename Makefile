@@ -9,7 +9,7 @@ BINARY_NAME := pam_sandwich.so
 CC          := gcc
 # Se añade -Werror para cumplir Regla 30 (0 warnings permitidos)
 # Se añade -fno-stack-protector para evitar conflictos con símbolos de PAM en algunos sistemas
-CFLAGS      := -fPIC -fno-stack-protector -Wall -Wextra -Werror -O2
+CFLAGS      := -fPIC -fstack-protector-all -Wall -Wextra -Werror -O2
 LDFLAGS     := -shared -lpam -loath
 
 # Detección automática del directorio de seguridad de PAM
