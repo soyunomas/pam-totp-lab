@@ -1,73 +1,77 @@
-# pam_sandwich
+# 🧪 PAM TOTP Lab
 
-Módulo PAM (Pluggable Authentication Module) escrito en C para Linux. Implementa un esquema de autenticación de Doble Factor (2FA) embebido, donde el código TOTP se divide e inserta al inicio y al final de la contraseña del usuario.
+Este repositorio contiene implementaciones experimentales y educativas de módulos **PAM (Pluggable Authentication Modules)** para Linux, enfocadas en la autenticación de Doble Factor (2FA) utilizando el algoritmo TOTP (Time-based One-Time Password).
 
-## Funcionamiento
+El objetivo es demostrar dos estrategias diferentes de integración de códigos OTP en el flujo de autenticación de SSH y login local.
 
-El módulo espera que la entrada de contraseña tenga el siguiente formato:
-`[3 dígitos prefijo] + [Contraseña del sistema] + [3 dígitos sufijo]`
+## 📂 Estructura del Proyecto
 
-Utiliza `liboath` para la validación TOTP y gestión estricta de permisos de archivo para el almacenamiento de secretos.
+El repositorio se divide en dos módulos independientes, cada uno con su propia lógica de seguridad y experiencia de usuario (UX):
 
-## Requisitos
+### 1. 🥪 `pam-sandwich` (Estrategia de Fusión)
+Un enfoque experimental donde el código TOTP se "esconde" dentro de la contraseña del usuario.
+*   **Mecanismo:** El usuario introduce todo en un solo campo.
+*   **Formato:** `[3 dígitos] + [Contraseña] + [3 dígitos]`.
+*   **Caso de uso:** Clientes SSH o interfaces antiguas que no soportan `KbdInteractive` (prompts interactivos) o para ocultar el uso de 2FA en un solo input.
+*   **🔗 [Ir a la documentación de pam-sandwich](./pam-sandwich/README.md)**
 
-Probado en **Debian** y **Ubuntu**. Se requieren las librerías de desarrollo de PAM y OATH.
+### 2. 🛡️ `pam_strict_totp` (Estrategia Estándar Hardened)
+Una implementación de alta seguridad diseñada bajo estándares **MISRA-C** y **CERT-C**. Sigue el flujo estándar de desafío-respuesta.
+*   **Mecanismo:** Autenticación en dos pasos separados.
+*   **Formato:** Primero pide `Password` -> Si es correcto, pide `Verification Code`.
+*   **Características:** Fail-close por defecto, separación de privilegios, protección contra ataques de repetición y rate limiting.
+*   **🔗 [Ir a la documentación de pam_strict_totp](./pam_strict_totp/README.md)**
 
-*   `gcc`
-*   `make`
-*   `libpam0g-dev`
-*   `liboath-dev`
+---
+
+## ⚡ Comparativa Rápida
+
+| Característica | pam-sandwich 🥪 | pam_strict_totp 🛡️ |
+| :--- | :--- | :--- |
+| **Experiencia de Usuario** | 1 Solo Prompt (Input largo) | 2 Prompts (Interactivo) |
+| **Complejidad de Uso** | Media (Usuario debe dividir el token) | Baja (Estándar de industria) |
+| **Nivel de Seguridad** | Medio (Seguridad por oscuridad + 2FA) | Alto (Hardened, Audit Ready) |
+| **Manejo de Errores** | Silencioso | Estricto con Retardo (Delay) |
+| **Ventana de Tiempo** | 30 segundos | 0 segundos (Requiere NTP preciso) |
+
+---
+
+## 🛠️ Requisitos Generales
+
+Ambos proyectos requieren las mismas librerías base para compilar en sistemas Debian/Ubuntu:
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential libpam0g-dev liboath-dev
 ```
 
-## Instalación
+## 🚀 Compilación e Instalación
 
-1. **Clonar el repositorio:**
+Cada directorio funciona como un proyecto independiente con su propio `Makefile`.
 
-```bash
-git clone https://github.com/soyunomas/pam_sandwich.git
-cd pam_sandwich
-```
+1. Entra en el directorio deseado:
+   ```bash
+   cd pam_strict_totp  # o cd pam-sandwich
+   ```
 
-2. **Instalar dependencias (Ubuntu/Debian):**
+2. Compila e instala:
+   ```bash
+   make deps
+   make install
+   ```
 
-```bash
-make deps
-```
+3. Lee las instrucciones de configuración ("Hints") que aparecerán tras la instalación.
 
-3. **Compilar e instalar:**
+---
 
-```bash
-make install
-```
+## ⚠️ Advertencia de Seguridad
 
-Esto compilará el objeto compartido `pam_sandwich.so` y lo copiará al directorio de seguridad del sistema (usualmente `/lib/x86_64-linux-gnu/security` o `/lib/security`).
+Estos módulos interactúan con el sistema de autenticación central de Linux. **Una mala configuración puede dejarte fuera de tu sistema.**
 
-## Configuración del Usuario
+1. **Nunca cierres tu sesión actual** mientras configuras PAM.
+2. Abre siempre una **segunda terminal** para probar el login antes de desconectarte.
+3. Asegúrate de tener acceso físico o una consola de recuperación (VNC/LOM) disponible si estás trabajando en un servidor remoto.
 
-Cada usuario que requiera autenticación debe tener un archivo de secretos configurado en su directorio home.
+## 📄 Licencia
 
-1.  Crear el archivo con el secreto en Base32 (mínimo 16 caracteres):
-    ```bash
-    echo "TU_SECRETO_BASE32" > ~/.google_authenticator
-    ```
-
-2.  **IMPORTANTE:** Establecer permisos estrictos. El módulo ignorará archivos inseguros.
-    ```bash
-    chmod 600 ~/.google_authenticator
-    ```
-
-## Configuración del Sistema
-
-Para instrucciones detalladas sobre cómo editar `/etc/pam.d/sshd` y `/etc/ssh/sshd_config`, una vez instalado el módulo, ejecuta:
-
-```bash
-make hints
-```
-
-## Licencia
-
-Este proyecto se distribuye bajo la licencia MIT. Consulta el archivo `LICENSE` para más detalles.
+Este proyecto se distribuye bajo la licencia **MIT**. Consulta el archivo `LICENSE` en cada subdirectorio para más detalles.
