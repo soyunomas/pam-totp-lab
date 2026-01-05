@@ -6,7 +6,7 @@ El objetivo es demostrar diferentes estrategias de integración de códigos OTP 
 
 ## 📂 Estructura del Proyecto
 
-El repositorio se divide en tres módulos independientes, cada uno con su propia lógica de seguridad y experiencia de usuario (UX):
+El repositorio se divide en cuatro módulos independientes, cada uno con su propia lógica de seguridad y experiencia de usuario (UX):
 
 ### 1. 🥪 `pam-sandwich` (Estrategia de Fusión TOTP)
 Un enfoque experimental donde el código TOTP estándar (Google Authenticator) se "esconde" dentro de la contraseña del usuario.
@@ -30,25 +30,34 @@ Un módulo de "Defensa Dinámica" que implementa una estrategia de **Sandwich Te
 *   **Seguridad:** Código auditado (CERT-C), limpieza de memoria activa (Anti-Forensic) y validación de permisos estricta.
 *   **🔗 [Ir a la documentación de pam_chronoguard](./pam_chronoguard/README.md)**
 
+### 4. 🏦 `pam_partial_key` (Estrategia Bancaria)
+Implementación del método clásico de autenticación parcial donde nunca se envía la contraseña completa por la red.
+*   **Mecanismo:** El sistema solicita caracteres en índices aleatorios (ej. "Introduce posiciones 2, 8 y 14").
+*   **Formato:** Prompt: `Posiciones [2] [8] [14]:` -> Input: `a 7 H`.
+*   **Caso de uso:** Entornos hostiles con alto riesgo de **Keyloggers**. Si un atacante captura las teclas, solo obtiene 3 caracteres desordenados inservibles para futuros intentos.
+*   **Seguridad:** Hashing posicional (SHA256 + Salt + Index), comparación de tiempo constante y protección contra Replay Attacks.
+*   **🔗 [Ir a la documentación de pam_partial_key](./pam_partial_key/README.md)**
+
 ---
 
 ## ⚡ Comparativa Rápida
 
-| Característica | pam-sandwich 🥪 | pam_strict_totp 🛡️ | pam_chronoguard ⏳ |
-| :--- | :--- | :--- | :--- |
-| **Tecnología Base** | TOTP (Algoritmo OATH) | TOTP (Algoritmo OATH) | Tiempo del Sistema (Pattern) |
-| **Experiencia UX** | 1 Solo Prompt (Fusión) | 2 Prompts (Interactivo) | 1 Solo Prompt (Fusión) |
-| **Dependencia** | App Externa (Móvil) | App Externa (Móvil) | Reloj Mental / Sistema |
-| **Complejidad Uso** | Media (Concatenar Token) | Baja (Estándar Industria) | Alta (Carga Cognitiva) |
-| **Nivel Seguridad** | Medio (Security by Obscurity) | Muy Alto (Hardened) | Alto (Anti-Forensic) |
-| **Ventana Tiempo** | 30 segundos | 30 segundos | 1 Minuto (Configurable) |
+| Característica | pam-sandwich 🥪 | pam_strict_totp 🛡️ | pam_chronoguard ⏳ | pam_partial_key 🏦 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Tecnología Base** | TOTP (OATH) | TOTP (OATH) | Tiempo (Pattern) | Partial Hash (SHA256) |
+| **Experiencia UX** | 1 Solo Prompt | 2 Prompts | 1 Solo Prompt | Interactivo (Desafío) |
+| **Dependencia** | App Móvil | App Móvil | Reloj Mental | Clave Mental / Fichero |
+| **Complejidad Uso** | Media | Baja | Alta | Media (Visual) |
+| **Nivel Seguridad** | Medio (Obscurity) | Muy Alto (Hardened) | Alto (Anti-Forensic) | Alto (Anti-Keylogger) |
+| **Mitigación Principal** | Phishing Simple | Fuerza Bruta / Robo Cred. | Shoulder Surfing | **Keyloggers / Replay** |
 
 ---
 
 ## 🛠️ Requisitos Generales
 
-Para compilar cualquiera de los módulos en sistemas Debian/Ubuntu, se recomiendan las siguientes librerías base:
+Para compilar cualquiera de los módulos en sistemas Debian/Ubuntu, se recomiendan las siguientes librerías base (incluyendo OpenSSL para el módulo bancario):
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential libpam0g-dev liboath-dev
+sudo apt install -y build-essential libpam0g-dev liboath-dev libssl-dev
+```
