@@ -6,14 +6,13 @@
 
 Desarrollado bajo estrictos estándares de **Secure Coding (MISRA-C / CERT-C)**, garantizando gestión segura de memoria, aislamiento de privilegios y robustez contra condiciones de carrera.
 
-## 🔒 Características de Seguridad
+## 🛡️ Características de Seguridad
 
-*   **Zero Warnings Policy:** Compilado con `-Wall -Wextra -Werror -fstack-protector-all`.
-*   **Privilege Separation:** El módulo reduce sus privilegios (drops root) a los del usuario objetivo antes de leer cualquier archivo de configuración.
-*   **Fail-Close / Secure Defaults:** Por defecto deniega el acceso si el archivo de configuración es ilegible o inseguro.
-*   **Race Condition Hardening:** Protección contra ataques TOCTOU mediante validación de descriptores de archivo (`fstat`) en lugar de rutas.
-*   **Secure Memory Wipe:** Limpieza activa (`volatile` + `memset`) de buffers y secretos en RAM tras su uso.
-*   **Permission Enforcement:** Exige permisos estrictos (`0600`) en el archivo de configuración del usuario.
+*   **Anti-Timing Attacks:** Comparación de tokens de tiempo constante (`secure_equals`) para evitar la deducción de claves por análisis de latencia.
+*   **Privilege Separation:** El proceso reduce sus privilegios efectivos a los del usuario objetivo antes de leer cualquier configuración.
+*   **Symlink Protection:** Apertura de archivos con `O_NOFOLLOW` y validación de descriptores (`fstat`) para prevenir ataques de sustitución de archivos.
+*   **Memory Hygiene:** Borrado activo (`explicit_bzero` pattern) de secretos en RAM inmediatamente después de su uso.
+*   **Input Sanitization:** Limpieza estricta de caracteres no alfanuméricos en el prompt para evitar inyección de terminal.
 
 ## Requisitos
 
