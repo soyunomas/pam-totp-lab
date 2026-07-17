@@ -15,7 +15,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -44,6 +44,12 @@ jobs:
           if [ -d pam_totp_shuffle ]; then
             chmod +x pam_totp_shuffle/verify.sh
             make -C pam_totp_shuffle verify
+          fi
+
+      - name: Verify optional pam_totp_slot_challenge module
+        run: |
+          if [ -d pam_totp_slot_challenge ]; then
+            make -C pam_totp_slot_challenge verify
           fi
 
       - name: Run complete repository verification gate
