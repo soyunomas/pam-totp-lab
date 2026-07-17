@@ -11,45 +11,52 @@ El módulo selecciona aleatoriamente uno de varios secretos TOTP locales y solic
 - Antirreplay independiente por usuario y slot.
 - Sin daemon, red, broker, TPM ni criptografía propia.
 
-## Puertas obligatorias
+## Estado de las puertas
 
-### Fase 1 — Política y selección
+### Fase 1 — Política y selección: completada localmente
 
-- Lista cerrada de slots.
-- Rechazo de cantidades fuera de 2–4.
-- Selección uniforme con `getrandom()` y rechazo de sesgo modular.
-- Pruebas deterministas de la ruta de rechazo y pruebas repetidas del RNG.
+- [x] Lista cerrada de slots.
+- [x] Rechazo de cantidades fuera de 2–4.
+- [x] Selección uniforme con `getrandom()` y rechazo de sesgo modular.
+- [x] Pruebas deterministas de la ruta de rechazo y pruebas repetidas del RNG.
+- [x] Warnings fatales, análisis estático, ASan y UBSan.
 
-La fase solo se cierra si pasan compilación con warnings fatales, pruebas unitarias, análisis estático, ASan y UBSan.
+### Fase 2 — Lectura segura: completada localmente
 
-### Fase 2 — Lectura segura
+- [x] Directorio de usuario privado y propiedad correcta.
+- [x] Archivos regulares `0600`, sin symlinks ni hard links.
+- [x] Base32 mayúscula, sin padding, una única línea y límites estrictos.
+- [x] Ausencia o corrupción produce denegación.
+- [x] Pruebas negativas y sanitizers.
 
-- Directorio de usuario privado y propiedad correcta.
-- Archivos regulares `0600`, sin symlinks ni hard links.
-- Base32 mayúscula, sin padding, una única línea y límites estrictos.
-- Ausencia o corrupción produce denegación.
+### Fase 3 — Integración PAM/TOTP: completada localmente
 
-### Fase 3 — Integración PAM/TOTP
+- [x] Obtener usuario mediante PAM.
+- [x] Seleccionar el slot antes del prompt.
+- [x] Prompt inequívoco sin revelar dispositivo físico.
+- [x] Validar exactamente seis dígitos mediante liboath.
+- [x] Antirreplay separado mediante etiquetas cerradas por slot.
+- [x] Limpiar secreto, código y respuesta.
+- [x] Prueba de integración con PAM, liboath, lector y replay simulados.
 
-- Obtener usuario mediante PAM.
-- Seleccionar el slot antes del prompt.
-- Prompt inequívoco sin revelar dispositivo físico.
-- Validar exactamente seis dígitos mediante liboath.
-- Antirreplay separado mediante etiquetas cerradas por slot.
-- Limpiar secreto, código y respuesta.
+### Fase 4 — Endurecimiento: puerta local completada; puerta remota pendiente
 
-### Fase 4 — Endurecimiento
+- [x] Pruebas negativas, concurrencia y separación de estado.
+- [x] Clang Static Analyzer, ASan y UBSan.
+- [x] Puerta local `make verify-local`.
+- [ ] Compilación real con GCC y Clang contra PAM/liboath.
+- [ ] Valgrind.
+- [ ] Full RELRO, pila no ejecutable y ausencia de RPATH, RUNPATH y TEXTREL.
 
-- Pruebas negativas, concurrencia y separación de estado.
-- GCC y Clang.
-- Clang Static Analyzer, ASan, UBSan y Valgrind.
-- Full RELRO, pila no ejecutable y ausencia de RPATH, RUNPATH y TEXTREL.
+Las tres comprobaciones pendientes requieren el runner de GitHub Actions o un sistema con `libpam0g-dev`, `liboath-dev`, Valgrind y binutils.
 
-### Fase 5 — Documentación e integración
+### Fase 5 — Documentación e integración: documentación completada; fusión bloqueada por CI
 
-- README del módulo con instalación, enrolamiento, recuperación y límites.
-- README principal actualizado.
-- PR revisada y fusionada únicamente con todas las puertas disponibles en verde.
+- [x] README del módulo con instalación, enrolamiento, recuperación y límites.
+- [x] README principal actualizado en la rama.
+- [x] PR borrador abierta.
+- [ ] Revisión remota completa en verde.
+- [ ] Fusión a `main`.
 
 ## Límite de seguridad
 
