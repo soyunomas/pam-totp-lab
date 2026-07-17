@@ -4,6 +4,9 @@ Este repositorio contiene implementaciones experimentales y educativas de módul
 
 El objetivo es demostrar diferentes estrategias de integración de códigos OTP y variables de tiempo en el flujo de autenticación de SSH y login local.
 
+> **Roadmap experimental:** consulta [TODO: autenticación PAM experimental](./TODO_AUTHENTICATION_IDEAS.md)
+> para ver nuevas propuestas, fases de desarrollo, riesgos y criterios de prueba.
+
 > **Compatibilidad:** varios módulos leen ficheros de usuario mediante cambios
 > temporales de EUID, EGID y grupos. Ese modelo está orientado a consumidores PAM
 > aislados por proceso, como los flujos habituales de SSH o `sudo`; no debe
