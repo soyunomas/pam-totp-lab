@@ -35,7 +35,7 @@ Implementación del método clásico de autenticación parcial donde nunca se en
 *   **Mecanismo:** El sistema solicita caracteres en índices aleatorios (ej. "Introduce posiciones 2, 8 y 14").
 *   **Formato:** Prompt: `Posiciones [2] [8] [14]:` -> Input: `a 7 H`.
 *   **Caso de uso:** Entornos hostiles con alto riesgo de **Keyloggers**. Si un atacante captura las teclas, solo obtiene 3 caracteres desordenados inservibles para futuros intentos.
-*   **Seguridad:** Hashing posicional (SHA256 + Salt + Index), comparación de tiempo constante y protección contra Replay Attacks.
+*   **Seguridad:** Hashing posicional (SHA256 + Salt + Index) y comparación de tiempo constante. No es MFA y la repetición de posiciones puede permitir reutilizar respuestas observadas; consulta sus límites antes de desplegarlo.
 *   **🔗 [Ir a la documentación de pam_partial_key](./pam_partial_key/README.md)**
 
 ### 5. 🏫 `pam_school_schedule` (Estrategia de Horario Lectivo)

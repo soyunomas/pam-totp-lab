@@ -61,6 +61,10 @@ The complete verification gate is:
 make -C tests verify
 ```
 
+The matrix also tests `pk_manager`'s atomic installation, including mode `0600`,
+overlong-password rejection, and replacement of a symlink without modifying its
+target.
+
 It runs the isolated stack and parser tests with GCC and Clang, builds every
 production artifact away from the source directories, fuzzes the partial-key
 parser, runs Clang Static Analyzer, checks the harness and parser with Valgrind,

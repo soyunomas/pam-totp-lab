@@ -18,7 +18,10 @@ CHRONO_TEST := $(BUILD_DIR)/test_chronoguard_helpers
 SCHOOL_TEST := $(BUILD_DIR)/test_school_schedule_helpers
 LIBOATH_TEST := $(BUILD_DIR)/test_liboath_window
 REPLAY_TEST := $(BUILD_DIR)/test_totp_replay
-HELPER_TESTS := $(CHRONO_TEST) $(SCHOOL_TEST) $(LIBOATH_TEST) $(REPLAY_TEST)
+PK_MANAGER_TEST := $(BUILD_DIR)/pk_manager
+TWO_MAN_TEST := $(BUILD_DIR)/test_2man_helpers
+HELPER_TESTS := $(CHRONO_TEST) $(SCHOOL_TEST) $(LIBOATH_TEST) $(REPLAY_TEST) \
+	$(TWO_MAN_TEST)
 PRODUCTION_DIR := $(BUILD_DIR)/production
 PRODUCTION_ARTIFACTS := \
 	$(PRODUCTION_DIR)/pam_sandwich.so \
@@ -64,6 +67,16 @@ $(REPLAY_TEST): test_totp_replay.c ../pam_common/totp_replay.c \
 	$(CC) -DTOTP_REPLAY_TESTING $(CFLAGS) test_totp_replay.c \
 		../pam_common/totp_replay.c -o $@ $(LDFLAGS_EXTRA)
 
+$(PK_MANAGER_TEST): ../pam_partial_key/pk_manager.c \
+		../pam_partial_key/keyfile.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) ../pam_partial_key/pk_manager.c -o $@ -lcrypto \
+		$(LDFLAGS_EXTRA)
+
+$(TWO_MAN_TEST): test_2man_helpers.c ../pam_2man_totp/pam_2man_totp.c \
+		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) test_2man_helpers.c ../pam_common/totp_replay.c \
+		-o $@ -lpam -loath -pthread $(LDFLAGS_EXTRA)
+
 $(PRODUCTION_DIR):
 	mkdir -p $@
 
@@ -104,13 +117,15 @@ $(PRODUCTION_DIR)/pam_2man_totp.so: ../pam_2man_totp/pam_2man_totp.c \
 
 production: $(PRODUCTION_ARTIFACTS)
 
-test: all $(PARSER_TEST) $(HELPER_TESTS)
+test: all $(PARSER_TEST) $(HELPER_TESTS) $(PK_MANAGER_TEST)
 	sh ./test_pam_stack.sh $(BUILD_DIR)
 	$(PARSER_TEST)
 	$(CHRONO_TEST)
 	$(SCHOOL_TEST)
 	$(LIBOATH_TEST)
 	$(REPLAY_TEST)
+	$(TWO_MAN_TEST)
+	sh ./test_pk_manager.sh $(PK_MANAGER_TEST)
 
 fuzz: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/fuzz-artifacts
@@ -138,6 +153,9 @@ analyze:
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
 		-DTOTP_REPLAY_TESTING -std=c11 -Wall -Wextra -Wpedantic \
 		test_totp_replay.c ../pam_common/totp_replay.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
+		-std=c11 -Wall -Wextra -Wpedantic test_2man_helpers.c \
+		../pam_common/totp_replay.c
 
 analyze-production:
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam-sandwich/pam_sandwich.c
@@ -150,7 +168,7 @@ analyze-production:
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_2man_totp/pam_2man_totp.c
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_common/totp_replay.c
 
-valgrind: all $(PARSER_TEST) $(HELPER_TESTS)
+valgrind: all $(PARSER_TEST) $(HELPER_TESTS) $(PK_MANAGER_TEST)
 	PAM_HARNESS_RUNNER='valgrind --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite --error-exitcode=99 --suppressions=valgrind.supp' \
 		sh ./test_pam_stack.sh $(BUILD_DIR)
 	valgrind --leak-check=full --show-leak-kinds=definite \
@@ -163,6 +181,10 @@ valgrind: all $(PARSER_TEST) $(HELPER_TESTS)
 		--errors-for-leak-kinds=definite --error-exitcode=99 $(LIBOATH_TEST)
 	valgrind --leak-check=full --show-leak-kinds=definite \
 		--errors-for-leak-kinds=definite --error-exitcode=99 $(REPLAY_TEST)
+	valgrind --leak-check=full --show-leak-kinds=definite \
+		--errors-for-leak-kinds=definite --error-exitcode=99 $(TWO_MAN_TEST)
+	PK_MANAGER_RUNNER='valgrind --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite --error-exitcode=99' \
+		sh ./test_pk_manager.sh $(PK_MANAGER_TEST)
 
 verify:
 	$(MAKE) BUILD_DIR=build/gcc CC=gcc test production

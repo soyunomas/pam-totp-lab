@@ -51,6 +51,7 @@
 #define TOTP_STEP           30
 #define FAIL_DELAY_MS       3000000
 #define MAX_USERNAME_LEN    255U
+#define MAX_NSS_BUFFER      (1024U * 1024U)
 
 static pthread_once_t oath_once = PTHREAD_ONCE_INIT;
 static int oath_init_status = OATH_CRYPTO_ERROR;
@@ -114,9 +115,11 @@ static int restore_privileges(uid_t uid, gid_t gid, int group_count,
 }
 
 static int safe_strcpy(char *dest, size_t size, const char *src) {
+    int written;
     if (!dest || !src || size == 0) return -1;
     dest[0] = '\0';
-    if (snprintf(dest, size, "%s", src) >= (int)size) {
+    written = snprintf(dest, size, "%s", src);
+    if (written < 0 || (size_t)written >= size) {
         return -1;
     }
     return 0;
@@ -125,25 +128,65 @@ static int safe_strcpy(char *dest, size_t size, const char *src) {
 /* --- CORE LOGIC --- */
 
 static int is_user_privileged(const char *username, const char *groupname) {
-    struct group *grp;
-    char **members;
-    
+    struct group group_entry;
+    struct group *group_result = NULL;
+    struct passwd password_entry;
+    struct passwd *password_result = NULL;
+    char *group_buffer = NULL;
+    char *password_buffer = NULL;
+    long configured_size;
+    size_t group_buffer_size;
+    size_t password_buffer_size;
+    gid_t privileged_gid;
+    int privileged = 0;
+
     if (!username || !groupname) return 0;
 
-    grp = getgrnam(groupname);
-    if (!grp) {
-        syslog(LOG_ERR, "PAM_2MAN: Critical - Group %s not found.", groupname);
+    configured_size = sysconf(_SC_GETGR_R_SIZE_MAX);
+    if (configured_size < 0) configured_size = 16384;
+    if (configured_size <= 0 ||
+        (unsigned long)configured_size > MAX_NSS_BUFFER) {
         return 0;
     }
-
-    for (members = grp->gr_mem; *members != NULL; members++) {
-        if (strcmp(*members, username) == 0) return 1;
+    group_buffer_size = (size_t)configured_size;
+    group_buffer = calloc(1U, group_buffer_size);
+    if (group_buffer == NULL ||
+        getgrnam_r(groupname, &group_entry, group_buffer, group_buffer_size,
+                   &group_result) != 0 ||
+        group_result == NULL) {
+        syslog(LOG_ERR, "PAM_2MAN: Critical - Group %s not found.", groupname);
+        goto cleanup;
     }
-    
-    struct passwd *pwd = getpwnam(username);
-    if (pwd && pwd->pw_gid == grp->gr_gid) return 1;
+    privileged_gid = group_entry.gr_gid;
 
-    return 0;
+    if (group_entry.gr_mem != NULL) {
+        for (char **member = group_entry.gr_mem; *member != NULL; member++) {
+            if (strcmp(*member, username) == 0) {
+                privileged = 1;
+                goto cleanup;
+            }
+        }
+    }
+
+    configured_size = sysconf(_SC_GETPW_R_SIZE_MAX);
+    if (configured_size < 0) configured_size = 16384;
+    if (configured_size <= 0 ||
+        (unsigned long)configured_size > MAX_NSS_BUFFER) {
+        goto cleanup;
+    }
+    password_buffer_size = (size_t)configured_size;
+    password_buffer = calloc(1U, password_buffer_size);
+    if (password_buffer != NULL &&
+        getpwnam_r(username, &password_entry, password_buffer,
+                   password_buffer_size, &password_result) == 0 &&
+        password_result != NULL && password_entry.pw_gid == privileged_gid) {
+        privileged = 1;
+    }
+
+cleanup:
+    free(password_buffer);
+    free(group_buffer);
+    return privileged;
 }
 
 /*

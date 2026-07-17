@@ -54,13 +54,15 @@ static int restore_privileges(uid_t uid, gid_t gid, int group_count,
 }
 
 /* CONSTRUCTOR DE TIEMPO DINÁMICO */
-static void build_time_string(const char *fmt, const struct tm *t, char *out_buf, size_t max_len) {
-    if (!fmt || !out_buf || max_len == 0) return;
+static int build_time_string(const char *fmt, const struct tm *t,
+                             char *out_buf, size_t max_len) {
+    if (!fmt || !t || !out_buf || max_len == 0) return -1;
     
     memset(out_buf, 0, max_len);
     size_t current_len = 0;
     const char *p = fmt;
     char tmp[16]; 
+    size_t token_count = 0U;
 
     while (*p && current_len < (max_len - 1)) {
         memset(tmp, 0, sizeof(tmp));
@@ -104,11 +106,14 @@ static void build_time_string(const char *fmt, const struct tm *t, char *out_buf
             if (current_len + tmp_len < max_len) {
                 strncat(out_buf, tmp, max_len - current_len - 1);
                 current_len += tmp_len;
+                token_count++;
             } else {
-                break; 
+                return -1;
             }
         }
     }
+    if (fmt[0] != '\0' && token_count == 0U) return -1;
+    return 0;
 }
 
 /* Lectura segura de configuración con DROP PRIVILEGES */
@@ -278,8 +283,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         goto cleanup;
     }
     
-    build_time_string(pre_fmt, t, expected_pre, sizeof(expected_pre));
-    build_time_string(post_fmt, t, expected_suf, sizeof(expected_suf));
+    if (build_time_string(pre_fmt, t, expected_pre, sizeof(expected_pre)) != 0 ||
+        build_time_string(post_fmt, t, expected_suf, sizeof(expected_suf)) != 0) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
 
     /* 
      * [SECURITY FIX] v2.4

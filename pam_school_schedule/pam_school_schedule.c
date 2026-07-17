@@ -126,7 +126,7 @@ static int parse_time_to_minutes(const char *time_str) {
 }
 
 static int parse_day(const char *day_str) {
-    if (!day_str) return -1;
+    if (!day_str || strlen(day_str) != 3U) return -1;
     for (int i = 0; i < 7; i++) {
         if (strncasecmp(day_str, DAYS[i], 3) == 0) return i;
     }
@@ -226,7 +226,13 @@ static int get_expected_token(const char *username, char *token_out, size_t toke
     /* READ FILE */
     int fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
     FILE *fp = NULL;
-    if (fd >= 0) fp = fdopen(fd, "r");
+    if (fd >= 0) {
+        fp = fdopen(fd, "r");
+        if (fp == NULL) {
+            close(fd);
+            fd = -1;
+        }
+    }
 
     int found = 0;
     int status = TOKEN_ERROR;
@@ -338,7 +344,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
         /* Generate fake random token for comparison */
         is_valid_session = 0;
-        snprintf(expected_token, sizeof(expected_token), "FAKE_%d_%d", rand(), rand());
+        snprintf(expected_token, sizeof(expected_token),
+                 "INVALID_SCHEDULE_TOKEN");
     }
 
     /* Prompt User */

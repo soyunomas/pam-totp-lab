@@ -77,6 +77,9 @@ Cada usuario debe crear un archivo `.chronoguard` en su directorio `HOME`.
     *   `YYYY`: Año completo (2024)
     *   `WD` : Día de la semana (1=Lunes ... 7=Domingo)
 
+    Un valor no vacío debe contener al menos uno de estos tokens. Un formato que
+    sólo contenga texto desconocido se considera inválido y deniega el acceso.
+
     **Ejemplo 1 (Hora delante, Minuto detrás):**
     ```text
     PRE=HH

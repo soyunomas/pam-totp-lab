@@ -9,6 +9,12 @@ int main(void)
     char maximum_a[MAX_TOKEN_LEN];
     char maximum_b[MAX_TOKEN_LEN];
 
+    if (parse_day("MON") != 1 || parse_day("mon") != 1 ||
+        parse_day("MONDAY") != -1 || parse_day("MO") != -1) {
+        fputs("day parser accepted a non-canonical value\n", stderr);
+        return EXIT_FAILURE;
+    }
+
     if (!secure_equals_const("token", "token")) {
         fputs("equal tokens rejected\n", stderr);
         return EXIT_FAILURE;
