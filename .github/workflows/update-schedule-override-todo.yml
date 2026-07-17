@@ -205,3 +205,5 @@ Alto como control de política y autorización excepcional en un entorno pequeñ
           git add TODO_AUTHENTICATION_IDEAS.md
           git commit -m "docs: add schedule TOTP override proposal"
           git push origin HEAD:main
+
+# Trigger after workflow exists on the default branch.
