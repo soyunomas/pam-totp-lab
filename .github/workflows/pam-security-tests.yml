@@ -4,6 +4,9 @@ on:
   pull_request:
     branches:
       - main
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -12,7 +15,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,5 +32,10 @@ jobs:
             valgrind \
             binutils
 
-      - name: Run complete verification gate
+      - name: Verify pam_totp_domains
+        run: |
+          chmod +x pam_totp_domains/verify.sh
+          make -C pam_totp_domains verify
+
+      - name: Run complete repository verification gate
         run: make -C tests verify
