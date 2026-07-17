@@ -59,12 +59,19 @@ static void secure_memzero(void *s, size_t n) {
  */
 static int secure_equals_const(const char *a, const char *b) {
     if (!a || !b) return 0;
-    
-    volatile unsigned char result = 0;
+
+    size_t a_len = strnlen(a, MAX_TOKEN_LEN);
+    size_t b_len = strnlen(b, MAX_TOKEN_LEN);
+    volatile unsigned char result =
+        (unsigned char)(a_len ^ b_len);
+
+    if (a_len == MAX_TOKEN_LEN || b_len == MAX_TOKEN_LEN) {
+        result |= 1U;
+    }
     /* Always iterate MAX_TOKEN_LEN to hide actual length */
     for (size_t i = 0; i < MAX_TOKEN_LEN; i++) {
-        char c1 = (i < strlen(a)) ? a[i] : 0;
-        char c2 = (i < strlen(b)) ? b[i] : 0;
+        char c1 = (i < a_len) ? a[i] : 0;
+        char c2 = (i < b_len) ? b[i] : 0;
         result |= (unsigned char)(c1 ^ c2);
     }
     
@@ -203,25 +210,26 @@ static int get_expected_token(const char *username, char *token_out, size_t toke
             if (S_ISREG(st.st_mode) && st.st_uid == pwd.pw_uid && (st.st_mode & 0077) == 0) {
                 time_t now = time(NULL);
                 struct tm now_tm;
-                localtime_r(&now, &now_tm); 
-                int now_minutes = (now_tm.tm_hour * 60) + now_tm.tm_min;
-                int now_wday = now_tm.tm_wday; 
-                char line[MAX_LINE_LEN];
-                while (fgets(line, sizeof(line), fp)) {
-                    char *saveptr;
-                    char *day_str = strtok_r(line, " \t\r\n", &saveptr);
-                    char *start_str = strtok_r(NULL, " \t\r\n", &saveptr);
-                    char *end_str = strtok_r(NULL, " \t\r\n", &saveptr);
-                    char *raw_token = strtok_r(NULL, " \t\r\n", &saveptr);
-                    if (!day_str || !start_str || !end_str || !raw_token) continue;
-                    int cfg_day = parse_day(day_str);
-                    int start_min = parse_time_to_minutes(start_str);
-                    int end_min = parse_time_to_minutes(end_str);
-                    if (cfg_day == -1 || start_min == -1 || end_min == -1) continue;
-                    if (cfg_day == now_wday && now_minutes >= start_min && now_minutes < end_min) {
-                        expand_token(raw_token, token_out, token_size, &now_tm);
-                        found = 1;
-                        break;
+                if (now != (time_t)-1 && localtime_r(&now, &now_tm) != NULL) {
+                    int now_minutes = (now_tm.tm_hour * 60) + now_tm.tm_min;
+                    int now_wday = now_tm.tm_wday;
+                    char line[MAX_LINE_LEN];
+                    while (fgets(line, sizeof(line), fp)) {
+                        char *saveptr;
+                        char *day_str = strtok_r(line, " \t\r\n", &saveptr);
+                        char *start_str = strtok_r(NULL, " \t\r\n", &saveptr);
+                        char *end_str = strtok_r(NULL, " \t\r\n", &saveptr);
+                        char *raw_token = strtok_r(NULL, " \t\r\n", &saveptr);
+                        if (!day_str || !start_str || !end_str || !raw_token) continue;
+                        int cfg_day = parse_day(day_str);
+                        int start_min = parse_time_to_minutes(start_str);
+                        int end_min = parse_time_to_minutes(end_str);
+                        if (cfg_day == -1 || start_min == -1 || end_min == -1) continue;
+                        if (cfg_day == now_wday && now_minutes >= start_min && now_minutes < end_min) {
+                            expand_token(raw_token, token_out, token_size, &now_tm);
+                            found = 1;
+                            break;
+                        }
                     }
                 }
             } else {
@@ -268,10 +276,12 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     const char *username = NULL;
     char *password = NULL; 
     char expected_token[MAX_TOKEN_LEN] = {0};
+    size_t response_length = 0;
     
     /* Variables for Dummy/Fake logic */
     int is_valid_session = 0;
     int config_result = -1;
+    int final_retval = PAM_AUTH_ERR;
 
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || !username) {
         return PAM_AUTH_ERR;
@@ -316,19 +326,21 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     
     char *resp = NULL;
     int prompt_retval = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &resp, "%s", prompt);
-    
-    if (prompt_retval != PAM_SUCCESS || !resp) {
-        secure_memzero(expected_token, sizeof(expected_token));
-        return prompt_retval;
-    }
+
     password = resp;
+    if (password != NULL) {
+        response_length = strnlen(password, PAM_MAX_RESP_SIZE);
+    }
+    if (prompt_retval != PAM_SUCCESS || !resp) {
+        final_retval = prompt_retval == PAM_SUCCESS ? PAM_AUTH_ERR
+                                                    : prompt_retval;
+        goto cleanup;
+    }
 
     /* COMPARE (Always perform this step) */
     int compare_result = secure_equals_const(password, expected_token);
 
     /* FINAL DECISION */
-    int final_retval = PAM_AUTH_ERR;
-
     if (is_valid_session && compare_result) {
         final_retval = PAM_SUCCESS;
     } else {
@@ -340,10 +352,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         pam_fail_delay(pamh, AUTH_DELAY);
     }
 
+cleanup:
     /* Cleanup */
     secure_memzero(expected_token, sizeof(expected_token));
     if (password) {
-        secure_memzero(password, strlen(password));
+        secure_memzero(password, response_length);
         free(password); 
     }
     

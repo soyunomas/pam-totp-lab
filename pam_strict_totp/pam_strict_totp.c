@@ -210,6 +210,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     char secret_base32[256] = {0};
     char *secret_binary = NULL;
     size_t secret_binary_len = 0;
+    size_t otp_input_len = 0;
     int retval = PAM_AUTH_ERR;
     int nullok = 0;
 
@@ -235,18 +236,25 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     retval = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &otp_input, "Verification Code: ");
-    
-    if (retval != PAM_SUCCESS || otp_input == NULL) {
+
+    if (otp_input != NULL) {
+        otp_input_len = strnlen(otp_input, PAM_MAX_RESP_SIZE);
+    }
+    if (retval != PAM_SUCCESS) {
         goto cleanup;
     }
-
-    size_t input_len = strlen(otp_input);
-    if (input_len < 6 || input_len > 8) {
+    if (otp_input == NULL) {
         retval = PAM_AUTH_ERR;
         goto cleanup;
     }
 
-    for (size_t i = 0; i < input_len; i++) {
+    if (otp_input_len == PAM_MAX_RESP_SIZE || otp_input_len < 6U ||
+        otp_input_len > 8U) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
+
+    for (size_t i = 0; i < otp_input_len; i++) {
         if (otp_input[i] < '0' || otp_input[i] > '9') {
             retval = PAM_AUTH_ERR;
             goto cleanup;
@@ -283,7 +291,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 cleanup:
     secure_memzero(secret_base32, sizeof(secret_base32));
     if (secret_binary) secure_free((void**)&secret_binary, secret_binary_len);
-    if (otp_input) secure_free((void**)&otp_input, strlen(otp_input));
+    if (otp_input) secure_free((void**)&otp_input, otp_input_len);
 
     if (retval != PAM_SUCCESS) {
         pam_fail_delay(pamh, FAIL_DELAY);

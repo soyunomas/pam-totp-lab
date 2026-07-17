@@ -66,13 +66,13 @@ static void build_time_string(const char *fmt, const struct tm *t, char *out_buf
             snprintf(tmp, sizeof(tmp), "%02d", t->tm_mon + 1);
             p += 2; added = 1;
         }
-        else if (strncmp(p, "YY", 2) == 0 || strncmp(p, "AA", 2) == 0) {
-            snprintf(tmp, sizeof(tmp), "%02d", t->tm_year % 100);
-            p += 2; added = 1;
-        }
         else if (strncmp(p, "YYYY", 4) == 0) {
             snprintf(tmp, sizeof(tmp), "%04d", t->tm_year + 1900);
             p += 4; added = 1;
+        }
+        else if (strncmp(p, "YY", 2) == 0 || strncmp(p, "AA", 2) == 0) {
+            snprintf(tmp, sizeof(tmp), "%02d", t->tm_year % 100);
+            p += 2; added = 1;
         }
         else if (strncmp(p, "WD", 2) == 0) {
             snprintf(tmp, sizeof(tmp), "%d", (t->tm_wday == 0 ? 7 : t->tm_wday));
@@ -193,15 +193,18 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     (void)flags; (void)argc; (void)argv;
     const char *username = NULL;
     const char *password = NULL;
+    char *prompt_resp = NULL;
     char *clean_pass = NULL;
+    char pre_fmt[MAX_TIME_BUFFER] = {0};
+    char post_fmt[MAX_TIME_BUFFER] = {0};
+    char expected_pre[MAX_TIME_BUFFER] = {0};
+    char expected_suf[MAX_TIME_BUFFER] = {0};
+    size_t clean_len = 0;
     int retval = PAM_AUTH_ERR;
 
     openlog("pam_chronoguard", LOG_PID | LOG_CONS, LOG_AUTH);
 
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || !username) return PAM_AUTH_ERR;
-
-    char pre_fmt[MAX_TIME_BUFFER] = {0};
-    char post_fmt[MAX_TIME_BUFFER] = {0};
 
     /* Si no hay config, ignoramos (auth optional support) */
     if (get_user_config(username, pre_fmt, post_fmt, sizeof(pre_fmt)) != 0) return PAM_IGNORE; 
@@ -210,20 +213,28 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (pam_get_item(pamh, PAM_AUTHTOK, (const void **)&password) != PAM_SUCCESS) return PAM_AUTH_ERR;
     
     if (!password) { 
-        char *resp = NULL;
-        retval = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &resp, "Password: ");
-        if (retval != PAM_SUCCESS || !resp) return PAM_AUTH_ERR;
-        pam_set_item(pamh, PAM_AUTHTOK, resp);
-        password = resp; 
+        retval = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &prompt_resp,
+                            "Password: ");
+        if (retval != PAM_SUCCESS) goto cleanup;
+        if (!prompt_resp) {
+            retval = PAM_AUTH_ERR;
+            goto cleanup;
+        }
+        if (pam_set_item(pamh, PAM_AUTHTOK, prompt_resp) != PAM_SUCCESS) {
+            retval = PAM_AUTH_ERR;
+            goto cleanup;
+        }
+        password = prompt_resp;
     }
 
     time_t now = time(NULL);
     struct tm t_buf; 
     struct tm *t = localtime_r(&now, &t_buf);
+    if (now == (time_t)-1 || t == NULL) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
     
-    char expected_pre[MAX_TIME_BUFFER] = {0};
-    char expected_suf[MAX_TIME_BUFFER] = {0};
-
     build_time_string(pre_fmt, t, expected_pre, sizeof(expected_pre));
     build_time_string(post_fmt, t, expected_suf, sizeof(expected_suf));
 
@@ -235,7 +246,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     
     size_t pre_len = strlen(expected_pre);
     size_t suf_len = strlen(expected_suf);
-    size_t pass_len = strlen(password);
+    size_t pass_len = strnlen(password, PAM_MAX_RESP_SIZE);
+    if (pass_len == PAM_MAX_RESP_SIZE) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
     size_t min_len = pre_len + suf_len + 1; 
 
     /* Validación de longitud para evitar underflows en la resta posterior */
@@ -262,7 +277,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     /* Extracción de la contraseña real "sandwicheada" */
-    size_t clean_len = pass_len - pre_len - suf_len;
+    clean_len = pass_len - pre_len - suf_len;
     clean_pass = malloc(clean_len + 1);
     if (!clean_pass) {
         retval = PAM_BUF_ERR;
@@ -285,6 +300,11 @@ cleanup:
     if (clean_pass) {
         secure_memzero(clean_pass, clean_len);
         free(clean_pass);
+    }
+    if (prompt_resp) {
+        size_t response_len = strnlen(prompt_resp, PAM_MAX_RESP_SIZE);
+        secure_memzero(prompt_resp, response_len);
+        free(prompt_resp);
     }
     secure_memzero(expected_pre, sizeof(expected_pre));
     secure_memzero(expected_suf, sizeof(expected_suf));

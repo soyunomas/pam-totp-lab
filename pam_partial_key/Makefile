@@ -66,7 +66,7 @@ deps:
 # --- COMPILACIÓN ---
 build:
 	@echo "${BLUE}[*] Compilando Módulo PAM ($(BINARY_NAME))...${RESET}"
-	$(CC) $(CFLAGS) -o $(BINARY_NAME) pam_partial_key.c $(LDFLAGS_PAM)
+	$(CC) $(CFLAGS) -o $(BINARY_NAME) pam_partial_key.c keyfile.c $(LDFLAGS_PAM)
 	
 	@echo "${BLUE}[*] Compilando Gestor de Claves ($(MANAGER_NAME))...${RESET}"
 	$(CC) $(CFLAGS) -o $(MANAGER_NAME) pk_manager.c $(LDFLAGS_BIN)

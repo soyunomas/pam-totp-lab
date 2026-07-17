@@ -47,6 +47,7 @@
 #define TOTP_WINDOW         1
 #define TOTP_STEP           30
 #define FAIL_DELAY_MS       3000000
+#define MAX_USERNAME_LEN    255U
 
 /* Internal Status Codes */
 typedef enum {
@@ -233,8 +234,8 @@ static int verify_totp(const char *username, const char *secret_base32, const ch
     size_t secret_bin_len = 0;
     int rc;
 
-    size_t input_len = strlen(input_code);
-    if (input_len < 6 || input_len > 8) return PAM_AUTH_ERR;
+    size_t input_len = strnlen(input_code, 9U);
+    if (input_len < 6U || input_len > 8U) return PAM_AUTH_ERR;
     for (size_t i = 0; i < input_len; i++) {
         if (input_code[i] < '0' || input_code[i] > '9') return PAM_AUTH_ERR;
     }
@@ -267,6 +268,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     int ret;
     int final_result = PAM_AUTH_ERR;
     int nullok = 0;
+    size_t otp1_len = 0U;
+    size_t otp2_len = 0U;
+    size_t user2_len = 0U;
     secure_status_t status1;
 
     /* Parse Arguments */
@@ -283,6 +287,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (pam_get_user(pamh, &user1, NULL) != PAM_SUCCESS || user1 == NULL) {
         return PAM_AUTH_ERR;
     }
+    if (strnlen(user1, MAX_USERNAME_LEN + 1U) > MAX_USERNAME_LEN) {
+        return PAM_AUTH_ERR;
+    }
 
     status1 = load_user_secret(user1, secret1, sizeof(secret1), &fake1);
     
@@ -295,9 +302,13 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
     /* Ask User 1 OTP (Always run prompt to prevent enumeration if file is missing but nullok NOT set) */
     char prompt_u1[128];
-    snprintf(prompt_u1, sizeof(prompt_u1), "Verification Code [%s]: ", user1);
+    int prompt_length = snprintf(prompt_u1, sizeof(prompt_u1),
+                                 "Verification Code [%s]: ", user1);
+    if (prompt_length < 0 || (size_t)prompt_length >= sizeof(prompt_u1)) {
+        goto cleanup;
+    }
     ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &otp1, "%s", prompt_u1);
-    
+    if (otp1 != NULL) otp1_len = strnlen(otp1, PAM_MAX_RESP_SIZE);
     if (ret != PAM_SUCCESS || otp1 == NULL) goto cleanup;
 
     if (verify_totp(user1, secret1, otp1, fake1) != PAM_SUCCESS) {
@@ -308,7 +319,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
     /* --- FASE 2: AUTORIZADOR (User 2) --- */
     ret = pam_prompt(pamh, PAM_PROMPT_ECHO_ON, &user2_input, "Authorizer Username (Wheel Group): ");
+    if (user2_input != NULL) {
+        user2_len = strnlen(user2_input, MAX_USERNAME_LEN + 1U);
+    }
     if (ret != PAM_SUCCESS || user2_input == NULL) goto cleanup;
+    if (user2_len > MAX_USERNAME_LEN) goto cleanup;
 
     if (strcmp(user1, user2_input) == 0) {
         syslog(LOG_WARNING, "PAM_2MAN: Self-auth attempt by %s", user1);
@@ -324,9 +339,13 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     char prompt_u2[128];
-    snprintf(prompt_u2, sizeof(prompt_u2), "Verification Code [%s]: ", user2_input);
+    prompt_length = snprintf(prompt_u2, sizeof(prompt_u2),
+                             "Verification Code [%s]: ", user2_input);
+    if (prompt_length < 0 || (size_t)prompt_length >= sizeof(prompt_u2)) {
+        goto cleanup;
+    }
     ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &otp2, "%s", prompt_u2);
-
+    if (otp2 != NULL) otp2_len = strnlen(otp2, PAM_MAX_RESP_SIZE);
     if (ret != PAM_SUCCESS || otp2 == NULL) goto cleanup;
 
     if (verify_totp(user2_input, secret2, otp2, fake2) == PAM_SUCCESS) {
@@ -340,9 +359,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 cleanup:
     secure_memzero(secret1, sizeof(secret1));
     secure_memzero(secret2, sizeof(secret2));
-    if (otp1) secure_free((void**)&otp1, strlen(otp1));
-    if (otp2) secure_free((void**)&otp2, strlen(otp2));
-    if (user2_input) secure_free((void**)&user2_input, strlen(user2_input));
+    if (otp1) secure_free((void**)&otp1, otp1_len);
+    if (otp2) secure_free((void**)&otp2, otp2_len);
+    if (user2_input) secure_free((void**)&user2_input, user2_len);
 
     if (final_result != PAM_SUCCESS) {
         pam_fail_delay(pamh, FAIL_DELAY_MS);

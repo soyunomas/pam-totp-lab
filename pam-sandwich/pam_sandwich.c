@@ -235,6 +235,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     
     /* Buffers estáticos (stack) inicializados a 0 */
     char secret_base32[256] = {0};
+    char token_str[TOTP_FULL_LEN + 1] = {0};
     
     /* Punteros dinámicos para gestión de memoria manual */
     char *secret_binary = NULL; 
@@ -243,6 +244,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     /* REGLA 3: Inicialización TEMPRANA para evitar uninitialized warnings en cleanup */
     size_t clean_len = 0;
     size_t secret_binary_len = 0;
+    size_t prompt_resp_len = 0;
+    size_t total_len = 0;
     
     int retval = PAM_AUTH_ERR;
 
@@ -263,13 +266,24 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (retval != PAM_SUCCESS || input_pass == NULL || input_pass[0] == '\0') {
         /* PRINCIPIO 9: Least Astonishment (Aunque el diseño sea raro, el prompt debe ser claro) */
         retval = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &prompt_resp, "Password: ");
-        if (retval != PAM_SUCCESS || prompt_resp == NULL) {
+        if (prompt_resp != NULL) {
+            prompt_resp_len = strnlen(prompt_resp, PAM_MAX_RESP_SIZE);
+        }
+        if (retval != PAM_SUCCESS) {
+            goto cleanup;
+        }
+        if (prompt_resp == NULL) {
+            retval = PAM_AUTH_ERR;
             goto cleanup;
         }
         input_pass = prompt_resp; 
     }
 
-    size_t total_len = strlen(input_pass);
+    total_len = strnlen(input_pass, PAM_MAX_RESP_SIZE);
+    if (total_len == PAM_MAX_RESP_SIZE) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
 
     /* REGLA 4: Integer Overflow/Underflow Prevention */
     /* Necesitamos al menos 3 (pre) + 1 (pass) + 3 (suf) = 7 caracteres */
@@ -279,9 +293,6 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     /* 4. DISECCIÓN SEGURA DEL TOKEN (SANDWICH STRATEGY) */
-    /* Buffer para recomponer el token de 6 dígitos */
-    char token_str[TOTP_FULL_LEN + 1] = {0};
-
     /* A. Copiar Prefijo (primeros 3) */
     /* REGLA 1: Uso de memcpy controlado por constantes */
     memcpy(token_str, input_pass, TOTP_PREFIX_LEN);
@@ -370,7 +381,7 @@ cleanup:
     
     /* Si usamos prompt_resp (memoria asignada por PAM/malloc), debemos borrarla */
     if (prompt_resp) {
-        secure_free((void**)&prompt_resp, strlen(prompt_resp));
+        secure_free((void**)&prompt_resp, prompt_resp_len);
     }
 
     return retval;
