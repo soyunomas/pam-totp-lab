@@ -1,0 +1,33 @@
+name: PAM security verification
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build and analysis dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            libpam0g-dev \
+            liboath-dev \
+            libssl-dev \
+            valgrind \
+            binutils
+
+      - name: Run complete verification gate
+        run: make -C tests verify
