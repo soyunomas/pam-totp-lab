@@ -1,473 +1,873 @@
-# TODO: autenticación PAM experimental
+# TODO: ideas experimentales TOTP para PAM
 
-Este documento recopila conceptos de autenticación para futuras ampliaciones de
-PAM TOTP Lab. Son propuestas de investigación, no mecanismos listos para
-producción. Que una combinación parezca original no demuestra que sea inédita ni
-que sea segura: antes de implementarla se debe revisar literatura, proyectos y,
-si procede, patentes relacionadas.
+Este documento recopila propuestas para ampliar **PAM TOTP Lab** con nuevos módulos de autenticación TOTP.
+
+Las propuestas siguen el estilo actual del proyecto:
+
+- un módulo PAM independiente por idea;
+- funcionamiento completamente local;
+- compatibilidad con aplicaciones TOTP estándar siempre que sea posible;
+- sin broker;
+- sin daemon residente;
+- sin servicios de red;
+- sin TPM ni dispositivos especiales;
+- sin criptografía inventada;
+- con implementación pequeña, auditable y acompañada de pruebas.
+
+Estas ideas son experimentales. Algunas aumentan realmente la resistencia frente a determinados ataques; otras exploran interfaces de autenticación, combinaciones de factores o mecanismos de protección local. Cada módulo debe documentar claramente qué mejora y qué no mejora.
 
 ## Objetivo
 
-Explorar un modelo en el que PAM no se limite a responder «la identidad parece
-válida», sino que pueda comprobar intención, integridad del equipo, procedencia
-de la sesión y límites concretos de autorización.
+Explorar formas diferentes de utilizar TOTP dentro de PAM sin convertir el proyecto en una plataforma distribuida de autenticación.
 
-El resultado ideal sería una autorización:
-
-- ligada a una acción y un equipo concretos;
-- válida durante poco tiempo;
-- de un solo uso o con un presupuesto explícito;
-- resistente a repetición y confusión entre servicios;
-- revocable y recuperable sin crear una puerta trasera.
-
-## Reglas antes de empezar
-
-- [ ] Probar cada módulo únicamente con el harness aislado del repositorio.
-- [ ] No instalar un prototipo en `common-auth`, acceso remoto o una cuenta
-  administrativa sin una vía de recuperación independiente y ensayada.
-- [ ] Mantener el módulo PAM pequeño: sensores, red, TPM y operaciones lentas
-  deben vivir en un broker separado con privilegios mínimos.
-- [ ] Aplicar *fail closed* ante firmas inválidas, mensajes truncados, versiones
-  desconocidas, timeouts o estado anti-replay inconsistente.
-- [ ] Limitar tamaños, número de elementos, tiempo y memoria antes de procesar
-  cualquier mensaje.
-- [ ] No ejecutar una shell ni construir comandos a partir de datos recibidos.
-- [ ] No registrar secretos, respuestas, datos biométricos ni capacidades.
-- [ ] Comparar valores secretos en tiempo constante y limpiar copias sensibles.
-- [ ] Usar nonces impredecibles, caducidad corta y consumo atómico.
-- [ ] Vincular cada prueba al usuario, servicio PAM, host, sesión y versión del
-  protocolo; no confiar en variables de entorno controlables por el cliente.
-- [ ] Documentar el modelo de amenazas y las propiedades que el prototipo no
-  ofrece antes de escribir el módulo.
-- [ ] Ejecutar `make -C tests verify` y añadir pruebas específicas antes de pasar
-  una tarea a completada.
-
-## Arquitectura común propuesta
+Los módulos deben poder funcionar con una arquitectura sencilla:
 
 ```text
-Aplicación PAM
+Aplicación
     │
-    ├── módulo PAM: valida contexto, límites y resultado final
-    │       │
-    │       └── socket Unix autenticado y con timeout
-    │               │
-    │               └── broker sin privilegios
-    │                      ├── TPM / llave física
-    │                      ├── dispositivo acompañante
-    │                      ├── almacén anti-replay
-    │                      └── motor de políticas
-    │
-    └── vía de recuperación independiente
+    └── PAM
+          │
+          └── módulo experimental
+                ├── configuración local
+                ├── secreto TOTP
+                ├── estado antirreplay opcional
+                └── resultado PAM_SUCCESS / PAM_AUTH_ERR
 ```
 
-### Trabajo común
+Se permite una herramienta de configuración o enrolamiento ejecutada manualmente, pero no un proceso permanente.
 
-- [ ] `CORE-01` Definir un modelo de amenazas común: atacante remoto, proceso
-  local sin privilegios, usuario malicioso, relay, replay, reloj manipulado,
-  broker caído y administrador que pierde todos sus factores.
-- [ ] `CORE-02` Especificar un sobre de mensaje versionado y con codificación
-  canónica. Debe contener como mínimo tipo, versión, usuario, servicio, host,
-  identificador de sesión, nonce y vencimiento.
-- [ ] `CORE-03` Diseñar el socket Unix: ruta fija, propietario y modo estrictos,
-  comprobación de credenciales del proceso, timeout y mensajes acotados.
-- [ ] `CORE-04` Crear un broker de referencia que arranque sin secretos en la
-  línea de comandos, reduzca privilegios y rechace clientes no autorizados.
-- [ ] `CORE-05` Reutilizar o ampliar el almacén anti-replay para efectuar una
-  transición atómica `pendiente -> consumida`.
-- [ ] `CORE-06` Definir códigos de error internos que no revelen si falló una
-  identidad, dispositivo, firma o política concreta.
-- [ ] `CORE-07` Añadir dobles de prueba para reloj, aleatoriedad, broker, TPM y
-  dispositivo externo; ninguna prueba automática debe depender de hardware.
-- [ ] `CORE-08` Crear pruebas de protocolo para mensajes vacíos, demasiado
-  grandes, duplicados, fuera de orden, con versión futura y con campos repetidos.
-- [ ] `CORE-09` Crear pruebas de concurrencia, caída entre escritura y `fsync`,
-  cancelación, timeout, reloj atrasado y repetición después de reiniciar.
-- [ ] `CORE-10` Documentar instalación, desinstalación y recuperación antes de
-  permitir una prueba manual con PAM real.
+## Reglas comunes
+
+- [ ] Cada idea debe implementarse en su propio directorio.
+- [ ] El módulo debe fallar de forma cerrada ante errores.
+- [ ] No se aceptarán secretos mediante argumentos de línea de comandos.
+- [ ] Los archivos de usuario deberán tener propietario y permisos estrictos.
+- [ ] Los archivos globales deberán estar protegidos por `root`.
+- [ ] Los códigos y secretos se compararán en tiempo constante cuando sea aplicable.
+- [ ] Las copias sensibles se limpiarán explícitamente de memoria.
+- [ ] La ventana TOTP tendrá un límite pequeño y configurable.
+- [ ] Un código aceptado no podrá reutilizarse dentro del estado antirreplay disponible.
+- [ ] No se escribirán códigos TOTP, contraseñas, PIN ni secretos en logs.
+- [ ] Los límites de seguridad se explicarán sin presentar ofuscación como criptografía.
+- [ ] Todos los módulos tendrán pruebas positivas, negativas, de permisos y de concurrencia.
+- [ ] Ningún módulo se instalará automáticamente en `common-auth`.
+- [ ] Cada README incluirá procedimiento de recuperación y desinstalación.
 
 ## Prioridad recomendada
 
-| Orden | Proyecto | Valor de investigación | Complejidad | Dependencias |
+| Orden | Proyecto | Valor | Complejidad | Aplicación TOTP estándar |
 | ---: | --- | --- | --- | --- |
-| 1 | `pam_intentseal` | Muy alto | Media | `CORE-01..10` |
-| 2 | `pam_capability_mint` | Muy alto | Alta | `pam_intentseal` |
-| 3 | `pam_boot_and_human` | Alto | Alta | TPM 2.0 simulado |
-| 4 | `pam_trust_budget` | Alto | Alta | capacidades consumibles |
-| 5 | `pam_causal_chain` | Alto | Muy alta | agente de sesión |
-| 6 | `pam_delayed_recovery` | Alto | Alta | estado persistente seguro |
-| 7 | `pam_witness_mesh` | Medio | Muy alta | varios firmantes |
-| 8 | `pam_private_presence` | Medio | Muy alta | hardware de proximidad |
-| 9 | `pam_decay` | Medio | Muy alta | daemon de sesión |
-| 10 | `pam_policy_shards` | Experimental | Muy alta | varias anteriores |
+| 1 | `pam_totp_domains` | Muy alto | Baja | Sí |
+| 2 | `pam_totp_epoch_guard` | Muy alto | Media | Sí |
+| 3 | `pam_totp_quorum` | Alto | Media | Sí |
+| 4 | `pam_totp_slot_challenge` | Alto | Media | Sí |
+| 5 | `pam_totp_rollover` | Alto | Media | Sí |
+| 6 | `pam_totp_sealed_seed` | Alto | Alta | Sí |
+| 7 | `pam_totp_ladder` | Medio-alto | Media | Sí |
+| 8 | `pam_totp_shuffle` | Experimental | Baja | Sí |
+| 9 | `pam_totp_ticket` | Experimental | Alta | Sí |
+| 10 | `pam_totp_duress` | Investigación | Media | Sí |
 
 ---
 
-## 1. `pam_intentseal`: firma explícita de intención
+## 1. `pam_totp_domains`: secretos separados por servicio
 
 ### Idea
 
-El usuario no aprueba un login genérico: firma una descripción canónica de la
-acción. Un dispositivo acompañante podría mostrar «autorizar el servicio X en el
-host Y» y firmar algo equivalente a:
+Utilizar un secreto TOTP diferente dependiendo del servicio PAM que solicita la autenticación.
+
+Ejemplo:
 
 ```text
-version | user | pam_service | host | session | action_digest | nonce | expires
+sshd  → secreto SSH
+sudo  → secreto SUDO
+login → secreto LOGIN
+su    → secreto SU
 ```
 
-El texto mostrado y los bytes firmados deben proceder del mismo objeto
-canónico. Si la aplicación no entrega de forma autenticada la acción solicitada,
-el módulo solo podrá firmar el inicio de sesión o servicio, no inventar ese dato.
+Es frecuente reutilizar el mismo secreto TOTP para varios servicios. Si ese secreto queda expuesto, todos esos servicios quedan afectados.
+
+Este módulo separaría criptográficamente los dominios de autenticación sin necesitar infraestructura externa.
+
+### Experiencia de usuario
+
+El usuario tendría varias entradas en su aplicación:
+
+```text
+Servidor - SSH
+Servidor - SUDO
+Servidor - LOGIN
+```
+
+El prompt indicaría claramente cuál debe utilizar:
+
+```text
+TOTP para SUDO:
+```
+
+### Formato de configuración
+
+```text
+~/.pam_totp_domains/
+├── sshd.secret
+├── sudo.secret
+├── login.secret
+└── su.secret
+```
+
+También podría utilizarse un único archivo estructurado con límites estrictos.
 
 ### Desarrollo
 
-- [ ] `INTENT-01` Definir qué contexto entrega PAM de forma fiable y qué contexto
-  necesita integración específica con la aplicación consumidora.
-- [ ] `INTENT-02` Especificar el objeto de intención y su codificación canónica.
-- [ ] `INTENT-03` Implementar generador de nonce y registro atómico de desafíos.
-- [ ] `INTENT-04` Crear un firmante de laboratorio con claves desechables; no
-  empezar por una aplicación móvil real.
-- [ ] `INTENT-05` Verificar firma, propósito, host, servicio, vencimiento y estado
-  de consumo en el broker.
-- [ ] `INTENT-06` Construir `pam_intentseal.so` como cliente fino del broker.
-- [ ] `INTENT-07` Añadir confirmación humana que muestre todos los datos relevantes
-  y rechace textos recortados o ambiguos.
-- [ ] `INTENT-08` Documentar integraciones que solo puedan autenticar servicio y
-  aquellas capaces de autenticar una operación concreta.
+- [ ] `DOMAIN-01` Obtener el servicio exclusivamente mediante `PAM_SERVICE`.
+- [ ] `DOMAIN-02` Definir una lista permitida de nombres de servicio.
+- [ ] `DOMAIN-03` Rechazar rutas, separadores y nombres desconocidos.
+- [ ] `DOMAIN-04` Implementar secretos independientes por servicio.
+- [ ] `DOMAIN-05` Permitir una política explícita para servicios sin secreto.
+- [ ] `DOMAIN-06` Implementar estado antirreplay separado por usuario y servicio.
+- [ ] `DOMAIN-07` Crear una herramienta de enrolamiento que genere los QR.
+- [ ] `DOMAIN-08` Añadir migración desde un único secreto TOTP.
 
 ### Pruebas de aceptación
 
-- [ ] Una firma para otro host, usuario, servicio, acción o versión es rechazada.
-- [ ] Dos solicitudes simultáneas no pueden consumir la misma aprobación.
-- [ ] Una respuesta válida recibida después del timeout es rechazada.
-- [ ] Reiniciar el broker no permite repetir una aprobación consumida.
-- [ ] Alterar el texto mostrado o cualquier byte firmado invalida la operación.
+- [ ] El código de SSH nunca funciona para `sudo`.
+- [ ] Un nombre de servicio manipulado no permite leer otro archivo.
+- [ ] El antirreplay de un servicio no bloquea códigos legítimos de otro.
+- [ ] Un servicio desconocido se rechaza salvo configuración explícita.
+- [ ] Los prompts muestran claramente el dominio solicitado.
 
-### Condición de parada
+### Valor de seguridad
 
-No conectar a un dispositivo real mientras el formato firmado pueda tener dos
-representaciones válidas o la aplicación no pueda suministrar el contexto de
-forma autenticada.
+Alto. Limita el impacto de la filtración de un secreto y evita reutilizar el mismo factor entre servicios con niveles de riesgo diferentes.
 
-## 2. `pam_capability_mint`: capacidades mínimas y consumibles
+## 2. `pam_totp_epoch_guard`: antirreplay persistente entre reinicios
 
 ### Idea
 
-Después de una autenticación fuerte, emitir una capacidad opaca limitada a una
-acción, audiencia y vencimiento. Usarla debe consumirla atómicamente; copiarla no
-debe otorgar una segunda autorización.
+Crear una variante de TOTP endurecida cuyo estado antirreplay sobreviva a reinicios.
+
+Un estado almacenado únicamente en `/run` desaparece al reiniciar. Después del arranque, un código capturado dentro de la ventana válida podría volver a aceptarse hasta que el nuevo estado quede establecido.
+
+Este módulo guardaría de forma segura el último contador TOTP consumido.
+
+### Estado propuesto
+
+```text
+/var/lib/pam-totp-lab/replay/
+└── <uid>-<service>.state
+```
+
+Contenido conceptual:
+
+```text
+version
+uid
+service
+secret_id
+last_counter
+```
 
 ### Desarrollo
 
-- [ ] `CAP-01` Definir emisor, audiencia, propósito, identificador único,
-  vencimiento y número máximo de usos.
-- [ ] `CAP-02` Decidir entre capacidades firmadas con registro de consumo o
-  referencias aleatorias a estado conservado por el broker.
-- [ ] `CAP-03` Implementar emisión únicamente después de `pam_intentseal`.
-- [ ] `CAP-04` Vincular la capacidad al proceso o sesión cuando el consumidor
-  pueda proporcionar esa identidad de forma fiable.
-- [ ] `CAP-05` Implementar revocación y consumo transaccional resistente a fallos.
-- [ ] `CAP-06` Añadir una herramienta administrativa que solo liste metadatos no
-  sensibles y permita revocar, nunca exportar capacidades.
+- [ ] `EPOCH-01` Definir un formato pequeño, versionado y acotado.
+- [ ] `EPOCH-02` Crear archivos propiedad de `root` y no accesibles por usuarios.
+- [ ] `EPOCH-03` Usar bloqueo exclusivo durante lectura, comparación y actualización.
+- [ ] `EPOCH-04` Actualizar mediante archivo temporal, `fsync` y renombrado atómico.
+- [ ] `EPOCH-05` Rechazar estados truncados, duplicados o con formato desconocido.
+- [ ] `EPOCH-06` Definir comportamiento ante rollback del archivo.
+- [ ] `EPOCH-07` Separar estado por UID, servicio y secreto enrolado.
+- [ ] `EPOCH-08` Crear una herramienta administrativa para reiniciar el estado de forma explícita.
 
 ### Pruebas de aceptación
 
-- [ ] Una capacidad no funciona en otro servicio, host o acción.
-- [ ] Copiarla antes de usarla no permite dos consumos concurrentes.
-- [ ] Una capacidad revocada o vencida no puede reactivarse atrasando el reloj.
-- [ ] Un fallo durante el consumo queda en un estado seguro y recuperable.
+- [ ] Reiniciar el equipo no permite reutilizar el último código aceptado.
+- [ ] Dos procesos concurrentes no pueden aceptar el mismo contador.
+- [ ] Una caída durante la escritura no deja un estado permisivo.
+- [ ] Un archivo vacío o corrupto produce denegación.
+- [ ] Cambiar el secreto no hereda accidentalmente el contador anterior.
+- [ ] El reloj atrasado no reactiva códigos consumidos.
 
-## 3. `pam_boot_and_human`: integridad del equipo más usuario
+### Valor de seguridad
+
+Muy alto como mejora del módulo endurecido existente. No cambia la experiencia del usuario y resuelve una limitación concreta del estado volátil.
+
+## 3. `pam_totp_quorum`: varios TOTP de un mismo usuario
 
 ### Idea
 
-Combinar una autenticación humana con una prueba fresca del estado medido de la
-máquina. El TPM firma una cita ligada al nonce de la sesión; una política decide
-si ese estado es aceptable. La atestación identifica el estado del equipo, no a
-la persona, por lo que nunca debe usarse sola.
+Exigir varios códigos TOTP independientes para autenticar a un único usuario.
+
+Ejemplo de política:
+
+```text
+2 de 3 secretos registrados
+```
+
+Los secretos pueden estar almacenados en:
+
+- un teléfono;
+- una tableta;
+- una llave con generador TOTP;
+- una aplicación instalada en otro equipo.
+
+No debe confundirse con `pam_2man_totp`: aquí existe un solo usuario, pero utiliza varias credenciales TOTP.
+
+### Experiencia de usuario
+
+```text
+Código TOTP principal:
+Código TOTP secundario:
+```
+
+O, para una política de tres credenciales:
+
+```text
+Introduce dos códigos de los slots A, B y C:
+```
+
+### Configuración
+
+```text
+~/.pam_totp_quorum
+```
+
+Ejemplo conceptual:
+
+```text
+threshold=2
+slot=A:<secret>
+slot=B:<secret>
+slot=C:<secret>
+```
 
 ### Desarrollo
 
-- [ ] `BOOT-01` Crear primero un backend simulado de TPM y vectores de prueba.
-- [ ] `BOOT-02` Definir qué mediciones se evaluarán y cómo se actualizará la
-  política después de cambios legítimos de firmware, kernel o configuración.
-- [ ] `BOOT-03` Verificar firma, nonce, selección de mediciones y log de eventos.
-- [ ] `BOOT-04` Combinar el resultado con un factor humano independiente.
-- [ ] `BOOT-05` Diseñar un modo de recuperación que no convierta cada actualización
-  del sistema en un bloqueo permanente.
-- [ ] `BOOT-06` Implementar un backend TPM real solo después de pasar el simulador.
+- [ ] `QUORUM-01` Definir un máximo pequeño de slots.
+- [ ] `QUORUM-02` Validar que cada secreto sea diferente.
+- [ ] `QUORUM-03` Implementar políticas `1 de N`, `2 de N` y `N de N`.
+- [ ] `QUORUM-04` Mantener estado antirreplay independiente por slot.
+- [ ] `QUORUM-05` Evitar que el mismo código o slot cuente dos veces.
+- [ ] `QUORUM-06` Permitir desactivar un slot mediante una herramienta administrativa.
+- [ ] `QUORUM-07` Documentar que varios secretos en el mismo dispositivo no son factores realmente independientes.
+- [ ] `QUORUM-08` Limitar el número de prompts y el tiempo total de autenticación.
 
 ### Pruebas de aceptación
 
-- [ ] Una cita antigua, de otro TPM o para otro nonce es rechazada.
-- [ ] Cambiar una medición relevante conduce al estado esperado por la política.
-- [ ] Un TPM no disponible falla de la forma documentada para cada servicio.
-- [ ] Actualizar la política requiere autorización y deja un registro auditable.
+- [ ] Un único slot no alcanza un umbral de dos.
+- [ ] Repetir dos veces el mismo slot no alcanza el umbral.
+- [ ] Un código válido para A no se acepta como B.
+- [ ] Los códigos consumidos quedan registrados por separado.
+- [ ] Un slot desactivado no puede utilizarse.
+- [ ] Los errores no revelan qué slot concreto falló.
 
-## 4. `pam_trust_budget`: presupuesto de privilegios
+### Valor de seguridad
+
+Alto cuando los secretos están realmente separados. Bajo si todos están guardados en la misma aplicación y el mismo dispositivo.
+
+## 4. `pam_totp_slot_challenge`: selección aleatoria de credencial
 
 ### Idea
 
-Una autenticación fuerte desbloquea un presupuesto limitado: por ejemplo,
-varias operaciones ordinarias y una operación crítica. Cada uso consume una
-unidad. La seguridad no debe depender de esconder el contador.
+El usuario registra varios secretos TOTP identificados como slots:
+
+```text
+A, B, C, D
+```
+
+En cada autenticación, PAM selecciona aleatoriamente uno:
+
+```text
+Introduce el código del slot C:
+```
+
+Un atacante que haya robado solamente uno de los secretos no sabrá de antemano cuál será solicitado.
+
+### Diferencia respecto a `pam_totp_quorum`
+
+`pam_totp_quorum` exige varios códigos en cada login.
+
+`pam_totp_slot_challenge` exige solo uno, pero cambia aleatoriamente cuál.
+
+Es menos fuerte que un quorum, pero más cómodo.
 
 ### Desarrollo
 
-- [ ] `BUDGET-01` Modelar presupuestos por usuario, servicio, acción y periodo.
-- [ ] `BUDGET-02` Separar autenticación, autorización y recarga del presupuesto.
-- [ ] `BUDGET-03` Hacer el decremento atómico y resistente a reinicios.
-- [ ] `BUDGET-04` Impedir que intentos fallidos de un atacante agoten el presupuesto
-  antes de demostrar control de la capacidad correspondiente.
-- [ ] `BUDGET-05` Definir escalado: agotado el presupuesto, exigir una nueva
-  autenticación o un segundo aprobador, nunca conceder silenciosamente.
-- [ ] `BUDGET-06` Ofrecer consulta de saldo sin revelar capacidades ni secretos.
+- [ ] `SLOT-01` Permitir entre dos y ocho slots.
+- [ ] `SLOT-02` Seleccionar el slot mediante aleatoriedad criptográfica.
+- [ ] `SLOT-03` Evitar sesgos mediante selección uniforme.
+- [ ] `SLOT-04` No permitir que el cliente elija el slot.
+- [ ] `SLOT-05` Mantener antirreplay independiente para cada secreto.
+- [ ] `SLOT-06` Permitir nombres cortos que no revelen el dispositivo.
+- [ ] `SLOT-07` Implementar una opción `challenge_count=2`.
+- [ ] `SLOT-08` Añadir estadísticas de prueba para verificar la distribución.
 
 ### Pruebas de aceptación
 
-- [ ] Cien consumos concurrentes nunca superan el presupuesto emitido.
-- [ ] Un usuario no puede consultar ni consumir el presupuesto de otro.
-- [ ] Un reloj manipulado no recarga anticipadamente el presupuesto.
-- [ ] La recuperación tras un fallo no duplica ni pierde unidades sin registro.
+- [ ] Los slots aparecen con una distribución aproximadamente uniforme.
+- [ ] El código de otro slot no es aceptado.
+- [ ] El usuario no puede forzar repetidamente su slot preferido.
+- [ ] Un fallo no provoca automáticamente la selección de un slot más débil.
+- [ ] El mismo contador no puede consumirse dos veces en un slot.
 
-## 5. `pam_causal_chain`: prueba de procedencia de la sesión
+### Limitación
+
+Con un secreto comprometido y cuatro slots, el atacante tendría aproximadamente una oportunidad entre cuatro en cada desafío, antes de aplicar rate limiting.
+
+No sustituye a un verdadero segundo factor independiente.
+
+## 5. `pam_totp_rollover`: doble código consecutivo
 
 ### Idea
 
-Construir una cadena autenticada entre arranque, login, terminal, shell y
-solicitud privilegiada. El objetivo es distinguir una petición nacida de una
-sesión legítima de otra inyectada desde un proceso o terminal diferente.
+Exigir dos códigos TOTP pertenecientes a periodos temporales consecutivos.
+
+Flujo:
+
+```text
+1. Introducir el código actual.
+2. Esperar al siguiente intervalo.
+3. Introducir el nuevo código.
+```
+
+Esto demuestra que el usuario conserva acceso al generador durante más de un instante. Un código capturado de forma aislada no sería suficiente.
+
+### Experiencia de usuario
+
+```text
+Primer código TOTP:
+Código correcto. Introduce el siguiente código cuando cambie:
+```
+
+Para evitar esperas excesivas, el módulo podría iniciar este flujo solo cuando queden pocos segundos para el cambio o mostrar:
+
+```text
+Siguiente código en aproximadamente 8 segundos.
+```
 
 ### Desarrollo
 
-- [ ] `CHAIN-01` Definir exactamente qué amenaza se pretende detectar y cuáles
-  quedan fuera; un proceso con control total de la sesión puede seguir siendo
-  indistinguible del usuario.
-- [ ] `CHAIN-02` Crear identificadores no reutilizables para sesión y terminal.
-- [ ] `CHAIN-03` Encadenar eventos mediante hashes autenticados y claves efímeras.
-- [ ] `CHAIN-04` Obtener identidad de procesos mediante mecanismos del sistema,
-  no mediante PID aislado ni datos proporcionados por el cliente.
-- [ ] `CHAIN-05` Diseñar cierre, bifurcación, suspensión y restauración de sesión.
-- [ ] `CHAIN-06` Integrar la verificación como condición adicional de una
-  capacidad, no como prueba humana independiente.
+- [ ] `ROLLOVER-01` Registrar el contador del primer código aceptado.
+- [ ] `ROLLOVER-02` Exigir exactamente el contador siguiente.
+- [ ] `ROLLOVER-03` Establecer un timeout total estricto.
+- [ ] `ROLLOVER-04` No aceptar dos códigos del mismo periodo.
+- [ ] `ROLLOVER-05` No aceptar un código anterior como segundo paso.
+- [ ] `ROLLOVER-06` Consumir ambos contadores de forma segura.
+- [ ] `ROLLOVER-07` Añadir un modo que espere antes del primer prompt cuando el periodo acaba de comenzar.
+- [ ] `ROLLOVER-08` Documentar el impacto de hasta treinta segundos adicionales.
 
 ### Pruebas de aceptación
 
-- [ ] Reutilizar un eslabón desde otra sesión o terminal es rechazado.
-- [ ] PID reutilizado, procesos huérfanos y bifurcaciones no confunden la cadena.
-- [ ] Suspender, reanudar y cerrar sesión invalidan los elementos previstos.
-- [ ] La ausencia del agente no produce una concesión por defecto.
+- [ ] Dos códigos del mismo contador son rechazados.
+- [ ] Un código capturado anteriormente no completa el flujo.
+- [ ] El segundo código debe corresponder exactamente al periodo siguiente.
+- [ ] Un timeout invalida el primer paso.
+- [ ] Dos autenticaciones simultáneas no pueden compartir la misma secuencia.
 
-## 6. `pam_delayed_recovery`: recuperación retardada y cancelable
+### Valor de seguridad
+
+Medio-alto frente a capturas aisladas o respuestas obtenidas con antelación. Sigue siendo vulnerable a phishing interactivo en tiempo real.
+
+## 6. `pam_totp_sealed_seed`: secreto TOTP cifrado con la contraseña
 
 ### Idea
 
-Permitir iniciar una recuperación cuando se pierden todos los factores, pero
-aplicando una espera visible, notificaciones y posibilidad de cancelación. Al
-terminar el plazo se emitiría una autorización de recuperación limitada y de un
-solo uso, nunca el secreto original.
+Guardar el secreto TOTP cifrado en lugar de almacenarlo directamente en Base32.
+
+La clave de cifrado se derivaría de la contraseña introducida por el usuario mediante un KDF estándar, como Argon2id o scrypt. Después se utilizaría un algoritmo AEAD mantenido por una biblioteca reconocida.
+
+Flujo:
+
+```text
+contraseña PAM
+    │
+    ├── validación normal mediante pam_unix
+    │
+    └── derivación de clave
+              │
+              └── descifrado temporal del secreto TOTP
+```
+
+El módulo reutilizaría la contraseña mediante `use_first_pass` o `try_first_pass`, sin volver a mostrarla.
+
+### Objetivo
+
+La copia del archivo del usuario no sería suficiente para recuperar inmediatamente el secreto TOTP. También sería necesaria la contraseña correcta.
+
+### Formato conceptual
+
+```text
+version
+kdf
+kdf_parameters
+salt
+nonce
+ciphertext
+authentication_tag
+```
 
 ### Desarrollo
 
-- [ ] `REC-01` Separar el canal de recuperación del stack PAM que se recupera.
-- [ ] `REC-02` Definir estados `solicitada`, `notificada`, `cancelada`, `madura`,
-  `consumida` y `expirada`, con transiciones atómicas.
-- [ ] `REC-03` Diseñar varios métodos de notificación sin incluir secretos.
-- [ ] `REC-04` Permitir cancelación con cualquier factor superviviente.
-- [ ] `REC-05` Emitir una capacidad limitada a reinscribir factores, no acceso
-  administrativo general.
-- [ ] `REC-06` Añadir rate limiting y protección contra solicitudes repetidas.
+- [ ] `SEALED-01` Utilizar exclusivamente KDF y AEAD existentes.
+- [ ] `SEALED-02` Definir parámetros mínimos y máximos del KDF.
+- [ ] `SEALED-03` Integrar `use_first_pass` y `try_first_pass`.
+- [ ] `SEALED-04` No conservar la contraseña más tiempo del necesario.
+- [ ] `SEALED-05` Limpiar contraseña, clave derivada y secreto descifrado.
+- [ ] `SEALED-06` Hacer indistinguibles los errores de contraseña, formato y TOTP.
+- [ ] `SEALED-07` Crear una utilidad para enrolar y cambiar la contraseña.
+- [ ] `SEALED-08` Diseñar una migración segura desde secretos en texto.
+- [ ] `SEALED-09` Protegerse frente a parámetros KDF manipulados que agoten memoria.
+- [ ] `SEALED-10` Documentar que `root` o un PAM comprometido puede capturar la contraseña durante el uso.
 
 ### Pruebas de aceptación
 
-- [ ] Atrasar o adelantar el reloj no evita la espera configurada.
-- [ ] Cancelar y solicitar simultáneamente termina en un único estado válido.
-- [ ] La autorización madura solo puede reinscribir y solo puede usarse una vez.
-- [ ] Una avalancha de solicitudes no oculta la notificación legítima ni bloquea
-  indefinidamente la cuenta.
+- [ ] Una contraseña incorrecta nunca produce un secreto utilizable.
+- [ ] Alterar un byte del archivo invalida el descifrado.
+- [ ] Los parámetros excesivos se rechazan antes de reservar memoria.
+- [ ] No aparecen secretos en volcados de prueba después de la limpieza.
+- [ ] Cambiar la contraseña vuelve a cifrar el secreto de forma segura.
+- [ ] El módulo no solicita la contraseña dos veces cuando está correctamente apilado.
 
-## 7. `pam_witness_mesh`: consenso entre testigos
+### Valor de seguridad
+
+Alto frente al robo aislado del archivo TOTP. No protege frente a `root`, malware dentro del proceso PAM o captura de la contraseña durante la autenticación.
+
+## 7. `pam_totp_ladder`: dificultad adaptativa local
 
 ### Idea
 
-Exigir un umbral de testigos independientes —por ejemplo equipo, llave física y
-otro dispositivo— que firmen el mismo desafío contextual. No basta con contar
-respuestas: cada testigo debe representar una frontera de confianza diferente.
+Aumentar progresivamente el requisito TOTP después de intentos fallidos.
+
+Ejemplo:
+
+```text
+Estado normal:
+    1 TOTP
+
+Después de 2 fallos:
+    1 TOTP + espera
+
+Después de 4 fallos:
+    2 TOTP consecutivos
+
+Después de 6 fallos:
+    bloqueo temporal
+```
+
+No se trata de aceptar diferentes niveles de seguridad según el riesgo, sino de hacer que los fallos nunca reduzcan la protección.
+
+### Estado local
+
+```text
+/run/pam-totp-lab/ladder/<uid>-<service>
+```
+
+O estado persistente, según la política elegida.
 
 ### Desarrollo
 
-- [ ] `MESH-01` Definir identidad, rol y método de alta/baja de cada testigo.
-- [ ] `MESH-02` Implementar una política de umbral explícita y versionada.
-- [ ] `MESH-03` Hacer que todos firmen exactamente el mismo objeto de intención.
-- [ ] `MESH-04` Evitar que clonar un único dispositivo cree varios votos.
-- [ ] `MESH-05` Diseñar rotación, pérdida y revocación sin rebajar el umbral de
-  manera silenciosa.
-- [ ] `MESH-06` Simular particiones, testigos lentos y respuestas contradictorias.
+- [ ] `LADDER-01` Definir estados y transiciones explícitas.
+- [ ] `LADDER-02` Separar contadores por usuario y servicio.
+- [ ] `LADDER-03` Evitar desbordamientos y valores negativos.
+- [ ] `LADDER-04` Aplicar retrasos con un límite máximo.
+- [ ] `LADDER-05` Escalar a `pam_totp_rollover` después del umbral.
+- [ ] `LADDER-06` Reiniciar gradualmente el nivel después de accesos válidos.
+- [ ] `LADDER-07` Evitar que un atacante bloquee indefinidamente una cuenta.
+- [ ] `LADDER-08` Añadir herramienta administrativa para consultar y reiniciar estado.
+- [ ] `LADDER-09` No revelar si el usuario existe.
+- [ ] `LADDER-10` Probar intentos concurrentes.
 
 ### Pruebas de aceptación
 
-- [ ] Firmas duplicadas del mismo testigo cuentan una sola vez.
-- [ ] Mezclar firmas de desafíos distintos nunca alcanza el umbral.
-- [ ] Revocar un testigo invalida respuestas posteriores y pendientes.
-- [ ] La indisponibilidad se resuelve según una política documentada, no mediante
-  aceptación automática.
+- [ ] Los fallos siempre mantienen o aumentan el nivel.
+- [ ] Un acceso correcto no borra arbitrariamente todo el historial.
+- [ ] Cien procesos concurrentes no pierden incrementos.
+- [ ] El estado de un usuario no afecta a otro.
+- [ ] El bloqueo tiene una duración máxima documentada.
+- [ ] La ausencia o corrupción del estado no concede acceso.
 
-## 8. `pam_private_presence`: presencia próxima no rastreable
+### Riesgo
+
+Puede utilizarse para causar denegación de servicio. El diseño deberá equilibrar escalado, rate limiting y recuperación.
+
+## 8. `pam_totp_shuffle`: entrada permutada
 
 ### Idea
 
-Demostrar que un dispositivo autorizado está físicamente próximo usando
-identificadores rotatorios y un desafío fresco, sin emitir una identidad fija
-que permita rastrearlo. La proximidad por radio no demuestra por sí sola quién
-es el usuario y los ataques de relay son el problema central.
+Mostrar una permutación aleatoria de las posiciones del código TOTP.
+
+Para un código:
+
+```text
+123456
+```
+
+El módulo podría mostrar:
+
+```text
+Introduce las posiciones en este orden: 4-1-6-2-5-3
+```
+
+La respuesta sería:
+
+```text
+416253
+```
+
+El módulo reconstruye internamente el TOTP original y lo valida.
+
+### Variantes
+
+#### Permutación completa
+
+```text
+Orden: 4-1-6-2-5-3
+```
+
+#### Rotación
+
+```text
+Empieza por la posición 3 y continúa circularmente
+```
+
+#### Inversión
+
+```text
+Introduce el código de derecha a izquierda
+```
+
+La permutación completa es la variante principal.
 
 ### Desarrollo
 
-- [ ] `PRES-01` Definir el atacante de relay y la precisión temporal necesaria
-  antes de seleccionar BLE, NFC, UWB u otro transporte.
-- [ ] `PRES-02` Diseñar credenciales rotatorias no enlazables por observadores.
-- [ ] `PRES-03` Ejecutar challenge-response con claves protegidas por el dispositivo.
-- [ ] `PRES-04` Combinar presencia con `pam_intentseal` u otro factor humano.
-- [ ] `PRES-05` No almacenar RSSI ni telemetría de localización salvo que sea
-  imprescindible y esté documentado.
-- [ ] `PRES-06` Medir falsos rechazos y aceptación mediante relay en un laboratorio.
+- [ ] `SHUFFLE-01` Generar una permutación uniforme.
+- [ ] `SHUFFLE-02` Mostrar todas las posiciones sin ambigüedad.
+- [ ] `SHUFFLE-03` Validar exactamente seis dígitos.
+- [ ] `SHUFFLE-04` Reconstruir el código sin modificar el buffer original.
+- [ ] `SHUFFLE-05` Limpiar tanto la entrada como el código reconstruido.
+- [ ] `SHUFFLE-06` Añadir modo de accesibilidad con rotaciones simples.
+- [ ] `SHUFFLE-07` Evitar repetir patrones predecibles.
+- [ ] `SHUFFLE-08` Integrar el antirreplay normal.
 
 ### Pruebas de aceptación
 
-- [ ] Capturar y retransmitir una sesión anterior no autentica.
-- [ ] Observadores pasivos no obtienen un identificador estable.
-- [ ] Una pérdida de radio o batería produce el fallo documentado.
-- [ ] La presencia nunca concede acceso sin el factor adicional configurado.
+- [ ] Todas las permutaciones reconstruyen correctamente el código.
+- [ ] Posiciones repetidas o ausentes son rechazadas.
+- [ ] Una respuesta correspondiente a otra permutación falla.
+- [ ] No se producen accesos fuera de rango.
+- [ ] El código original y el transformado se limpian de memoria.
 
-## 9. `pam_decay`: confianza con caducidad progresiva
+### Valor de seguridad
+
+Experimental.
+
+Puede dificultar observaciones parciales donde una persona ve únicamente el teclado o solo la respuesta. No protege frente a un keylogger que capture también el prompt, una grabación completa de pantalla ni phishing en tiempo real.
+
+No debe presentarse como un nuevo factor.
+
+## 9. `pam_totp_ticket`: reutilización local limitada
 
 ### Idea
 
-La autenticación inicial crea una capacidad corta que un agente de sesión puede
-renovar mientras existan pruebas recientes de presencia. PAM inicia y cierra la
-sesión; un daemon externo gestiona la continuidad. No se debe presentar como una
-función que un módulo PAM aislado pueda realizar por sí solo.
+Después de una autenticación TOTP correcta, crear un ticket local de corta duración para evitar solicitar códigos repetidamente.
+
+El ticket estaría ligado como mínimo a:
+
+```text
+usuario
+servicio PAM
+terminal o sesión
+boot_id
+hora de emisión
+hora de expiración
+```
+
+No existiría ningún daemon. El propio módulo PAM leería y actualizaría archivos protegidos por `root`.
+
+### Ejemplo
+
+```text
+Primer sudo:
+    contraseña + TOTP
+
+Siguientes sudo durante 3 minutos en la misma terminal:
+    contraseña, sin nuevo TOTP
+```
+
+### Objetivo
+
+Explorar una experiencia similar al timestamp de `sudo`, pero controlada por el módulo TOTP y con vinculaciones más estrictas.
 
 ### Desarrollo
 
-- [ ] `DECAY-01` Definir qué privilegio caduca y qué significa bloquear o degradar
-  una sesión ya iniciada.
-- [ ] `DECAY-02` Emitir capacidades renovables de alcance mínimo.
-- [ ] `DECAY-03` Separar señales de comodidad de factores de seguridad reales.
-- [ ] `DECAY-04` Implementar renovación sin convertir el agente en una autoridad
-  capaz de emitir capacidades nuevas.
-- [ ] `DECAY-05` Tratar suspensión, hibernación, cambio de usuario y desconexión.
-- [ ] `DECAY-06` Diseñar UX para advertir antes de degradar o bloquear.
+- [ ] `TICKET-01` Definir exactamente qué identifica una sesión o terminal.
+- [ ] `TICKET-02` No confiar en variables de entorno proporcionadas por el cliente.
+- [ ] `TICKET-03` Vincular el ticket a usuario, servicio y `boot_id`.
+- [ ] `TICKET-04` Establecer una duración máxima pequeña.
+- [ ] `TICKET-05` Crear y actualizar tickets de forma atómica.
+- [ ] `TICKET-06` Añadir opción `always_prompt` para servicios críticos.
+- [ ] `TICKET-07` Invalidar tickets al reiniciar.
+- [ ] `TICKET-08` Proporcionar una orden para eliminar todos los tickets.
+- [ ] `TICKET-09` No permitir que un usuario copie el ticket de otro.
+- [ ] `TICKET-10` Comparar el riesgo con el timestamp nativo de `sudo`.
 
 ### Pruebas de aceptación
 
-- [ ] Matar o falsificar el agente no extiende la confianza.
-- [ ] Suspender más allá del límite invalida la renovación prevista.
-- [ ] Una sesión no puede renovar capacidades de otra.
-- [ ] El bloqueo no destruye trabajo ni crea una vía de bypass documentada como
-  «recuperación».
+- [ ] El ticket no funciona en otra terminal.
+- [ ] El ticket no funciona para otro servicio.
+- [ ] El ticket no funciona para otro usuario.
+- [ ] Cambiar el `boot_id` lo invalida.
+- [ ] Un archivo copiado o modificado es rechazado.
+- [ ] La expiración no puede evitarse atrasando el reloj de pared.
+- [ ] La configuración de servicios críticos ignora cualquier ticket.
 
-## 10. `pam_policy_shards`: autorización reconstruida por condiciones
+### Valor de seguridad
+
+No aumenta la seguridad criptográfica. Es un experimento de equilibrio entre seguridad y usabilidad.
+
+Una duración excesiva convertiría el ticket en una forma de omitir el segundo factor.
+
+## 10. `pam_totp_duress`: código de coacción
 
 ### Idea
 
-Distribuir la capacidad de autorizar entre varios componentes: persona, TPM,
-dispositivo externo y política contextual. La combinación solo reconstruye una
-clave o capacidad efímera. Horario o ubicación no aportan secreto por sí solos y
-no deben contarse como factores independientes.
+Registrar un segundo secreto TOTP destinado a situaciones de coacción.
+
+El código de coacción **nunca concedería acceso**. Produciría el mismo error visible que un código incorrecto, pero escribiría un evento local protegido.
+
+```text
+TOTP normal  → autenticación normal
+TOTP coacción → denegación + registro local
+TOTP inválido → denegación normal
+```
+
+### Acción local permitida
+
+Inicialmente, solo:
+
+- escribir un marcador propiedad de `root`;
+- generar un mensaje genérico en `syslog`;
+- incrementar un contador de incidentes.
+
+No se enviarán mensajes de red ni se ejecutarán comandos.
 
 ### Desarrollo
 
-- [ ] `SHARD-01` Definir qué participantes poseen secreto criptográfico y cuáles
-  son únicamente condiciones de política.
-- [ ] `SHARD-02` Seleccionar un esquema de umbral revisado públicamente; no diseñar
-  criptografía propia.
-- [ ] `SHARD-03` Proteger cada fragmento en reposo y durante reconstrucción.
-- [ ] `SHARD-04` Reconstruir solo dentro de memoria controlada y destruir el
-  resultado inmediatamente después de emitir la capacidad.
-- [ ] `SHARD-05` Diseñar rotación de un participante sin reconstruir de forma
-  innecesaria el secreto completo.
-- [ ] `SHARD-06` Modelar participantes maliciosos, ausentes y coludidos.
+- [ ] `DURESS-01` Exigir secretos normal y de coacción diferentes.
+- [ ] `DURESS-02` Comparar ambos códigos sin diferencias temporales observables.
+- [ ] `DURESS-03` Denegar siempre el acceso tras un código de coacción.
+- [ ] `DURESS-04` No revelar en el prompt que existe esta función.
+- [ ] `DURESS-05` Crear el marcador mediante escritura atómica.
+- [ ] `DURESS-06` Aplicar límites al número y tamaño de eventos.
+- [ ] `DURESS-07` No ejecutar scripts ni comandos configurables.
+- [ ] `DURESS-08` Diseñar un método administrativo para consultar y limpiar alertas.
+- [ ] `DURESS-09` Analizar diferencias de tiempo y mensajes.
+- [ ] `DURESS-10` Documentar los riesgos humanos del mecanismo.
 
 ### Pruebas de aceptación
 
-- [ ] Menos del umbral no revela ni permite verificar el secreto reconstruido.
-- [ ] Fragmentos de épocas o políticas diferentes no se pueden combinar.
-- [ ] Rotación, revocación y recuperación conservan el umbral previsto.
-- [ ] Sanitizers y Valgrind no encuentran copias persistentes durante las pruebas.
+- [ ] Un código de coacción jamás devuelve `PAM_SUCCESS`.
+- [ ] El mensaje visible es equivalente al de un fallo ordinario.
+- [ ] El evento no contiene el código introducido.
+- [ ] Un usuario no puede eliminar el marcador.
+- [ ] Un atacante no puede utilizar la función para llenar el disco.
+- [ ] No existen diferencias temporales claras entre fallo normal y coacción.
+
+### Riesgo
+
+Es una función delicada. Si la persona que coacciona espera que el acceso funcione, la denegación puede empeorar la situación.
+
+Debe mantenerse como investigación y no presentarse como una solución universal de seguridad personal.
+
+---
+
+## Ideas descartadas inicialmente
+
+### TOTP modificado con algoritmos propios
+
+No crear variantes incompatibles de HMAC, truncado dinámico o generación temporal.
+
+El laboratorio debe utilizar TOTP estándar o construcciones claramente separadas alrededor de TOTP.
+
+### Códigos derivados de ubicación o dirección IP
+
+La ubicación, IP, SSID o RSSI pueden utilizarse como política contextual, pero no contienen un secreto y no son factores independientes.
+
+### Aceptar códigos futuros amplios
+
+Una ventana TOTP grande facilita ataques y no debe utilizarse para ocultar problemas de sincronización.
+
+### Secretos incluidos en el binario
+
+Compilar secretos directamente dentro de un módulo no proporciona una protección adecuada y dificulta la rotación.
+
+### Transformaciones mentales no especificadas
+
+Operaciones como sumar fechas, invertir selectivamente números o aplicar reglas personales pueden explorarse como UX, pero no deben describirse como criptografía.
+
+### Ejecución de scripts tras autenticación
+
+Los módulos no construirán ni ejecutarán comandos basándose en datos introducidos por el usuario.
+
+### Aplicación móvil propia durante las primeras fases
+
+Las primeras versiones utilizarán aplicaciones TOTP estándar. Una aplicación personalizada ampliaría demasiado el alcance y dificultaría distinguir los fallos PAM de los fallos del cliente.
+
+---
 
 ## Fases de ejecución
 
-### Fase 0 — Especificación y harness
+### Fase 0 — Componentes reutilizables
 
-- [ ] Completar `CORE-01..10`.
-- [ ] Elegir algoritmos y formatos existentes con implementaciones mantenidas.
-- [ ] Añadir fuzzing del protocolo y pruebas de propiedades anti-replay.
-- [ ] Criterio de salida: todas las decisiones críticas están documentadas y el
-  harness reproduce fallos de broker, almacenamiento y reloj.
+- [ ] Extraer un validador común de secretos Base32.
+- [ ] Extraer la generación y validación TOTP.
+- [ ] Extraer comparación constante.
+- [ ] Extraer limpieza segura de memoria.
+- [ ] Extraer comprobación de permisos y propietarios.
+- [ ] Extraer el almacenamiento antirreplay.
+- [ ] Crear un reloj simulado para las pruebas.
+- [ ] Crear dobles para conversaciones PAM.
+- [ ] Añadir fuzzing de archivos de configuración.
+- [ ] Mantener cada módulo enlazable y verificable por separado.
 
-### Fase 1 — Firma de intención
+#### Criterio de salida
 
-- [ ] Completar `INTENT-01..08` con un firmante simulado.
-- [ ] Revisar el modelo de amenazas y el código antes de usar hardware real.
-- [ ] Criterio de salida: ninguna aprobación puede cambiar de usuario, host,
-  servicio, acción o sesión, ni consumirse dos veces.
+Los componentes comunes tienen una API pequeña y no cambian el comportamiento de los módulos existentes.
 
-### Fase 2 — Capacidades y atestación
+### Fase 1 — Mejoras prácticas
 
-- [ ] Completar `CAP-01..06`.
-- [ ] Completar `BOOT-01..06` primero con TPM simulado.
-- [ ] Criterio de salida: las capacidades tienen alcance mínimo, consumo atómico,
-  revocación y recuperación probadas.
+Implementar:
 
-### Fase 3 — Políticas avanzadas
+1. `pam_totp_domains`
+2. `pam_totp_epoch_guard`
 
-- [ ] Implementar `pam_trust_budget` y después `pam_causal_chain`.
-- [ ] Ejecutar pruebas de estrés, concurrencia y fallos inducidos.
-- [ ] Criterio de salida: un fallo nunca amplía privilegios ni duplica capacidad.
+#### Criterio de salida
 
-### Fase 4 — Factores distribuidos y continuidad
+- Los secretos están separados por servicio.
+- El antirreplay sobrevive a reinicios.
+- No cambia la experiencia habitual de introducir un TOTP.
 
-- [ ] Evaluar por separado `pam_witness_mesh`, `pam_private_presence` y
-  `pam_decay`; no combinarlos antes de medirlos individualmente.
-- [ ] Criterio de salida: están cuantificados los falsos rechazos, los límites de
-  relay y el comportamiento sin conectividad.
+### Fase 2 — Múltiples secretos
 
-### Fase 5 — Recuperación y composición
+Implementar:
 
-- [ ] Completar `pam_delayed_recovery` antes de cualquier piloto real.
-- [ ] Evaluar `pam_policy_shards` únicamente con una construcción criptográfica
-  existente y revisada.
-- [ ] Criterio de salida: pérdida, revocación, actualización y rollback se han
-  ensayado sin acceso permanente ni puertas traseras.
+1. `pam_totp_slot_challenge`
+2. `pam_totp_quorum`
 
-## Checklist obligatoria por pull request
+#### Criterio de salida
 
-- [ ] El cambio pertenece a una sola fase y tiene alcance limitado.
-- [ ] El modelo de amenazas indica la propiedad nueva y sus exclusiones.
-- [ ] Los formatos persistentes y de red están versionados y acotados.
-- [ ] No aparecen secretos o capacidades en logs, argumentos o entorno.
-- [ ] Hay pruebas positivas, negativas, concurrencia y fallos inducidos.
-- [ ] Compila sin warnings con GCC y Clang.
-- [ ] Pasan análisis estático, sanitizers y Valgrind cuando sean aplicables.
-- [ ] Pasa `make -C tests verify` completo.
-- [ ] README, configuración, desinstalación y recuperación están actualizados.
-- [ ] Un revisor distinto confirma que el cambio no rebaja silenciosamente una
-  política existente.
+- Los slots no pueden confundirse.
+- Un secreto no cuenta varias veces.
+- La independencia real de dispositivos queda documentada.
 
-## Fuera de alcance inicialmente
+### Fase 3 — Desafíos temporales
 
-- Reconocimiento facial, huella o voz propios: deben delegarse en componentes
-  mantenidos y no almacenar plantillas biométricas en este laboratorio.
-- Clasificadores de comportamiento como único factor.
-- Criptografía casera o formatos binarios no especificados.
-- Autorizaciones basadas exclusivamente en hora, ubicación, dirección IP o RSSI.
-- Instalación automática en el stack PAM principal.
-- Cualquier mecanismo que conceda acceso cuando el broker no responde.
+Implementar:
 
-## Referencias de partida
+1. `pam_totp_rollover`
+2. `pam_totp_ladder`
 
-- [Linux-PAM](https://github.com/linux-pam/linux-pam)
-- [pam-u2f](https://developers.yubico.com/pam-u2f/)
-- [fprintd](https://fprint.freedesktop.org/)
-- [OCRA, RFC 6287](https://datatracker.ietf.org/doc/html/rfc6287)
-- [TPM2 Remote Attestation](https://tpm2-software.github.io/tpm2-tss/getting-started/2019/12/18/Remote-Attestation.html)
+#### Criterio de salida
+
+- El estado concurrente es consistente.
+- Los fallos nunca reducen el requisito.
+- Los timeouts no dejan autenticaciones parcialmente válidas.
+
+### Fase 4 — Protección del secreto
+
+Implementar:
+
+1. `pam_totp_sealed_seed`
+
+#### Criterio de salida
+
+- Se utilizan bibliotecas criptográficas mantenidas.
+- El archivo está autenticado.
+- Los secretos temporales se limpian.
+- Los parámetros del KDF están limitados.
+
+### Fase 5 — Experimentos de UX y política
+
+Evaluar por separado:
+
+1. `pam_totp_shuffle`
+2. `pam_totp_ticket`
+3. `pam_totp_duress`
+
+#### Criterio de salida
+
+Cada README diferencia claramente entre:
+
+- seguridad criptográfica;
+- mitigación parcial;
+- comodidad;
+- ofuscación;
+- riesgos operativos.
+
+---
+
+## Checklist por módulo
+
+- [ ] Tiene un modelo de amenazas.
+- [ ] Indica explícitamente qué ataques no evita.
+- [ ] Usa TOTP estándar.
+- [ ] No introduce un proceso residente.
+- [ ] No necesita conectividad.
+- [ ] Los formatos están versionados y acotados.
+- [ ] Comprueba propietario, tipo y permisos de cada archivo.
+- [ ] No sigue enlaces simbólicos inseguros.
+- [ ] No registra secretos ni respuestas.
+- [ ] Limpia memoria sensible.
+- [ ] Implementa comparación constante cuando corresponda.
+- [ ] Tiene rate limiting o documenta por qué no lo necesita.
+- [ ] Tiene protección antirreplay.
+- [ ] Tiene pruebas de concurrencia.
+- [ ] Tiene pruebas con reloj adelantado y atrasado.
+- [ ] Tiene pruebas de archivos truncados y corruptos.
+- [ ] Compila con GCC y Clang sin warnings.
+- [ ] Pasa sanitizers.
+- [ ] Pasa Valgrind cuando sea aplicable.
+- [ ] Incluye instalación, desinstalación y recuperación.
+- [ ] No se instala automáticamente en el stack PAM principal.
+
+---
+
+## Resultado esperado
+
+El objetivo no es sustituir `pam_strict_totp`, sino crear una colección de módulos comparables:
+
+```text
+pam_strict_totp
+    └── TOTP endurecido de referencia
+
+pam_totp_domains
+    └── separación por servicio
+
+pam_totp_epoch_guard
+    └── antirreplay persistente
+
+pam_totp_quorum
+    └── varios secretos simultáneos
+
+pam_totp_slot_challenge
+    └── selección aleatoria de secreto
+
+pam_totp_rollover
+    └── dos periodos consecutivos
+
+pam_totp_sealed_seed
+    └── secreto cifrado con contraseña
+
+pam_totp_ladder
+    └── dificultad adaptativa
+
+pam_totp_shuffle
+    └── transformación de entrada
+
+pam_totp_ticket
+    └── caché local limitada
+
+pam_totp_duress
+    └── detección local de coacción
+```
+
+Cada módulo debe continuar siendo pequeño, local, compilable y comprensible sin depender de una arquitectura externa.
