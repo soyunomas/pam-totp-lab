@@ -114,6 +114,11 @@ Si no puedes entrar, verifica lo siguiente:
 3.  **Formato:** Asegúrate de que no hay espacios en blanco ni saltos de línea extraños en el archivo del secreto.
 4.  **Ventana de Tiempo:** El módulo permite una ventana de ±30 segundos (1 paso) para compensar retrasos humanos.
 
+> **Anti-replay:** actualmente el módulo no persiste el contador TOTP utilizado.
+> Un código correcto puede reutilizarse mientras siga dentro de la ventana. Una
+> protección completa requiere estado por usuario y actualización atómica entre
+> procesos PAM.
+
 ---
 
 ## 📜 Licencia

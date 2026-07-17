@@ -8,7 +8,7 @@ CC          := gcc
 # Security: Stack protection, PIE, Fortify Source, Strict Warnings
 CFLAGS      := -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
                -Wall -Wextra -Werror -O2
-LDFLAGS     := -shared -lpam -loath
+LDFLAGS     := -shared -lpam -loath -pthread
 
 # Detección automática de directorio PAM (Distro-agnostic)
 ifneq ("$(wildcard /lib/x86_64-linux-gnu/security/.)","")

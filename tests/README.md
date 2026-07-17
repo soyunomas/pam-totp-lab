@@ -24,6 +24,10 @@ libFuzzer target adds AddressSanitizer and UndefinedBehaviorSanitizer coverage:
 make -C tests fuzz
 ```
 
+The deterministic liboath test fixes the expected window semantics: with a
+window of one, the current counter returns position zero and the immediately
+previous or next counter returns a positive successful position.
+
 Build all current production artifacts into the ignored test directory instead
 of overwriting the binaries tracked by the repository:
 

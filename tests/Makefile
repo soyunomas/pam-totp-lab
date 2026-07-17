@@ -16,7 +16,8 @@ PARSER_TEST := $(BUILD_DIR)/test_partial_key_parser
 PARSER_FUZZ := $(BUILD_DIR)/fuzz_partial_key_parser
 CHRONO_TEST := $(BUILD_DIR)/test_chronoguard_helpers
 SCHOOL_TEST := $(BUILD_DIR)/test_school_schedule_helpers
-HELPER_TESTS := $(CHRONO_TEST) $(SCHOOL_TEST)
+LIBOATH_TEST := $(BUILD_DIR)/test_liboath_window
+HELPER_TESTS := $(CHRONO_TEST) $(SCHOOL_TEST) $(LIBOATH_TEST)
 PRODUCTION_DIR := $(BUILD_DIR)/production
 PRODUCTION_ARTIFACTS := \
 	$(PRODUCTION_DIR)/pam_sandwich.so \
@@ -54,15 +55,18 @@ $(SCHOOL_TEST): test_school_schedule_helpers.c \
 		../pam_school_schedule/pam_school_schedule.c | $(BUILD_DIR)
 	$(CC) $(TEST_CPPFLAGS) $(CFLAGS) $< -o $@ -lpam $(LDFLAGS_EXTRA)
 
+$(LIBOATH_TEST): test_liboath_window.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< -o $@ -loath $(LDFLAGS_EXTRA)
+
 $(PRODUCTION_DIR):
 	mkdir -p $@
 
 $(PRODUCTION_DIR)/pam_sandwich.so: ../pam-sandwich/pam_sandwich.c | $(PRODUCTION_DIR)
-	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam -loath \
+	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam -loath -pthread \
 		$(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_strict_totp.so: ../pam_strict_totp/pam_strict_totp.c | $(PRODUCTION_DIR)
-	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam -loath \
+	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam -loath -pthread \
 		$(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_chronoguard.so: ../pam_chronoguard/pam_chronoguard.c | $(PRODUCTION_DIR)
@@ -83,7 +87,7 @@ $(PRODUCTION_DIR)/pam_school_schedule.so: ../pam_school_schedule/pam_school_sche
 		$(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_2man_totp.so: ../pam_2man_totp/pam_2man_totp.c | $(PRODUCTION_DIR)
-	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam -loath \
+	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam -loath -pthread \
 		$(LDFLAGS_EXTRA)
 
 production: $(PRODUCTION_ARTIFACTS)
@@ -93,6 +97,7 @@ test: all $(PARSER_TEST) $(HELPER_TESTS)
 	$(PARSER_TEST)
 	$(CHRONO_TEST)
 	$(SCHOOL_TEST)
+	$(LIBOATH_TEST)
 
 fuzz: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/fuzz-artifacts
@@ -115,6 +120,8 @@ analyze:
 		-std=c11 -Wall -Wextra -Wpedantic test_chronoguard_helpers.c
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text $(TEST_CPPFLAGS) \
 		-std=c11 -Wall -Wextra -Wpedantic test_school_schedule_helpers.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
+		-std=c11 -Wall -Wextra -Wpedantic test_liboath_window.c
 
 analyze-production:
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam-sandwich/pam_sandwich.c
@@ -135,6 +142,8 @@ valgrind: all $(PARSER_TEST) $(HELPER_TESTS)
 		--errors-for-leak-kinds=definite --error-exitcode=99 $(CHRONO_TEST)
 	valgrind --leak-check=full --show-leak-kinds=definite \
 		--errors-for-leak-kinds=definite --error-exitcode=99 $(SCHOOL_TEST)
+	valgrind --leak-check=full --show-leak-kinds=definite \
+		--errors-for-leak-kinds=definite --error-exitcode=99 $(LIBOATH_TEST)
 
 verify:
 	$(MAKE) BUILD_DIR=build/gcc CC=gcc test production

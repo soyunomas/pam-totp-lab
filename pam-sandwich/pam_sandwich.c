@@ -24,6 +24,7 @@
 #include <limits.h>     
 #include <sys/prctl.h>  
 #include <stdint.h>
+#include <pthread.h>
 
 /* Cabeceras de PAM */
 #include <security/pam_modules.h>
@@ -44,6 +45,23 @@
 #define TOTP_FULL_LEN   (TOTP_PREFIX_LEN + TOTP_SUFFIX_LEN)
 #define SECRET_NOT_FOUND 1
 #define SECRET_ERROR    (-1)
+
+static pthread_once_t oath_once = PTHREAD_ONCE_INIT;
+static int oath_init_status = OATH_CRYPTO_ERROR;
+
+static void initialize_oath(void)
+{
+    /* Keep liboath initialized for the process lifetime to avoid teardown races. */
+    oath_init_status = oath_init();
+}
+
+static int ensure_oath_initialized(void)
+{
+    return pthread_once(&oath_once, initialize_oath) == 0 &&
+                   oath_init_status == OATH_OK
+               ? 0
+               : -1;
+}
 
 /* =========================================================================
  * FUNCIONES AUXILIARES DE SEGURIDAD (HARDENED)
@@ -278,6 +296,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || username == NULL) {
         return PAM_AUTH_ERR;
     }
+    if (ensure_oath_initialized() != 0) {
+        return PAM_AUTH_ERR;
+    }
 
     /* 2. OBTENER SECRETO (FAIL-CLOSE) */
     int secret_status = get_user_secret(username, secret_base32,
@@ -354,6 +375,10 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     time_t now = time(NULL);
+    if (now == (time_t)-1) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
     /* Validar TOTP: ventana de +/- 1 paso (30s) */
     rc = oath_totp_validate3(secret_binary, secret_binary_len, 
                              now, TOTP_WINDOW, 
@@ -366,7 +391,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     secure_free((void**)&secret_binary, secret_binary_len);
     secure_memzero(token_str, sizeof(token_str));
 
-    if (rc != OATH_OK) {
+    if (rc < 0) {
         retval = PAM_AUTH_ERR;
         goto cleanup;
     }

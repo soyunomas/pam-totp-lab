@@ -9,6 +9,11 @@ El módulo espera que la entrada de contraseña tenga el siguiente formato:
 
 Utiliza `liboath` para la validación TOTP y gestión estricta de permisos de archivo para el almacenamiento de secretos.
 
+La validación admite un paso de desfase en ambas direcciones. El módulo no
+persiste todavía el contador TOTP consumido, por lo que un código puede
+reutilizarse mientras permanezca en esa ventana. Una defensa anti-replay real
+requiere estado por usuario y actualización atómica entre procesos PAM.
+
 ## Requisitos
 
 Probado en **Debian** y **Ubuntu**. Se requieren las librerías de desarrollo de PAM y OATH.

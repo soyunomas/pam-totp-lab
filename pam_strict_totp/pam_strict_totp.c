@@ -40,6 +40,7 @@
 #include <limits.h>     
 #include <sys/prctl.h>  
 #include <stdint.h>
+#include <pthread.h>
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
 #include <liboath/oath.h>
@@ -56,6 +57,23 @@
 #define SECRET_OK           0
 #define SECRET_NOT_FOUND    1
 #define SECRET_ERROR        -1
+
+static pthread_once_t oath_once = PTHREAD_ONCE_INIT;
+static int oath_init_status = OATH_CRYPTO_ERROR;
+
+static void initialize_oath(void)
+{
+    /* Keep liboath initialized for the process lifetime to avoid teardown races. */
+    oath_init_status = oath_init();
+}
+
+static int ensure_oath_initialized(void)
+{
+    return pthread_once(&oath_once, initialize_oath) == 0 &&
+                   oath_init_status == OATH_OK
+               ? 0
+               : -1;
+}
 
 static void secure_memzero(void *s, size_t n) {
     if (!s || n == 0) return;
@@ -239,6 +257,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || username == NULL) {
         return PAM_AUTH_ERR;
     }
+    if (ensure_oath_initialized() != 0) {
+        return PAM_AUTH_ERR;
+    }
 
     int secret_status = get_user_secret(username, secret_base32, sizeof(secret_base32));
 
@@ -287,6 +308,10 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     time_t now = time(NULL);
+    if (now == (time_t)-1) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
     
     /* FIX: Llamada correcta con paso de 30s y ventana de tolerancia */
     rc = oath_totp_validate3(secret_binary, secret_binary_len, 
@@ -297,7 +322,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
                              NULL, NULL, 
                              otp_input);
 
-    if (rc == OATH_OK && !fake_mode) {
+    if (rc >= 0 && !fake_mode) {
         retval = PAM_SUCCESS;
     } else {
         retval = PAM_AUTH_ERR;

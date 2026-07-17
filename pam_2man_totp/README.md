@@ -108,6 +108,10 @@ Reiniciar SSH: `sudo systemctl restart ssh`
 2.  **Log "Insecure permissions":** El archivo secreto tiene permisos `777` o grupo incorrecto. Ejecuta `chmod 600 ~/.google_authenticator`.
 3.  **Time Drift:** Los códigos TOTP fallan si el reloj del servidor tiene más de 30 segundos de desfase respecto al móvil. Usa NTP.
 
+> **Anti-replay:** no se guarda todavía el contador utilizado por cada usuario.
+> Evitar reutilizaciones requiere almacenamiento persistente y bloqueo atómico
+> compartido por todos los procesos PAM.
+
 ### Auditoría (Logs)
 El módulo escribe en `/var/log/auth.log` (o `syslog`):
 *   `PAM_2MAN: Dual Auth Success (alice + bob)`: Éxito.

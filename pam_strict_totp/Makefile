@@ -5,7 +5,7 @@
 BINARY_NAME := pam_strict_totp.so
 CC          := gcc
 CFLAGS      := -fPIC -fstack-protector-all -Wall -Wextra -Werror -O2
-LDFLAGS     := -shared -lpam -loath
+LDFLAGS     := -shared -lpam -loath -pthread
 
 # Detección de directorio PAM
 ifneq ("$(wildcard /lib/x86_64-linux-gnu/security/.)","")

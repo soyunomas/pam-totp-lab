@@ -37,6 +37,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdint.h>
+#include <pthread.h>
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
 #include <liboath/oath.h>
@@ -48,6 +49,23 @@
 #define TOTP_STEP           30
 #define FAIL_DELAY_MS       3000000
 #define MAX_USERNAME_LEN    255U
+
+static pthread_once_t oath_once = PTHREAD_ONCE_INIT;
+static int oath_init_status = OATH_CRYPTO_ERROR;
+
+static void initialize_oath(void)
+{
+    /* Keep liboath initialized for the process lifetime to avoid teardown races. */
+    oath_init_status = oath_init();
+}
+
+static int ensure_oath_initialized(void)
+{
+    return pthread_once(&oath_once, initialize_oath) == 0 &&
+                   oath_init_status == OATH_OK
+               ? 0
+               : -1;
+}
 
 /* Internal Status Codes */
 typedef enum {
@@ -266,10 +284,14 @@ static int verify_totp(const char *username, const char *secret_base32, const ch
     }
 
     time_t now = time(NULL);
+    if (now == (time_t)-1) {
+        secure_free((void**)&secret_bin, secret_bin_len);
+        return PAM_AUTH_ERR;
+    }
     rc = oath_totp_validate3(secret_bin, secret_bin_len, now, TOTP_STEP, 0, TOTP_WINDOW, NULL, NULL, input_code);
     secure_free((void**)&secret_bin, secret_bin_len);
 
-    if (rc == OATH_OK && !fake_mode) return PAM_SUCCESS;
+    if (rc >= 0 && !fake_mode) return PAM_SUCCESS;
     return PAM_AUTH_ERR;
 }
 
@@ -304,6 +326,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
     /* --- FASE 1: INICIADOR (User 1) --- */
     if (pam_get_user(pamh, &user1, NULL) != PAM_SUCCESS || user1 == NULL) {
+        return PAM_AUTH_ERR;
+    }
+    if (ensure_oath_initialized() != 0) {
         return PAM_AUTH_ERR;
     }
     if (strnlen(user1, MAX_USERNAME_LEN + 1U) > MAX_USERNAME_LEN) {
