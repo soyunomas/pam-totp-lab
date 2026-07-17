@@ -51,3 +51,5 @@ jobs:
           git add TODO_AUTHENTICATION_IDEAS.md
           git commit -m "docs: add schedule TOTP override proposal"
           git push origin "HEAD:${TARGET_BRANCH}"
+
+# Controlled trigger for the documentation PR.
