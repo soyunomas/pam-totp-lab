@@ -8,6 +8,7 @@ TEST_CPPFLAGS := -D_GNU_SOURCE
 CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic \
 	-fstack-protector-strong $(CFLAGS_EXTRA)
 MODULE_CFLAGS := $(CFLAGS) -fPIC
+HARDEN_LDFLAGS := -Wl,-z,relro,-z,now
 LDFLAGS_EXTRA ?=
 
 HARNESS := $(BUILD_DIR)/pam_harness
@@ -32,7 +33,8 @@ PRODUCTION_ARTIFACTS := \
 	$(PRODUCTION_DIR)/pam_school_schedule.so \
 	$(PRODUCTION_DIR)/pam_2man_totp.so
 
-.PHONY: all production test fuzz analyze analyze-production valgrind verify clean
+.PHONY: all production test fuzz analyze analyze-production valgrind hardening \
+	verify clean
 
 all: $(HARNESS) $(TEST_MODULE)
 
@@ -69,7 +71,8 @@ $(REPLAY_TEST): test_totp_replay.c ../pam_common/totp_replay.c \
 
 $(PK_MANAGER_TEST): ../pam_partial_key/pk_manager.c \
 		../pam_partial_key/keyfile.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) ../pam_partial_key/pk_manager.c -o $@ -lcrypto \
+	$(CC) -DPK_MANAGER_TESTING $(CFLAGS) ../pam_partial_key/pk_manager.c \
+		-o $@ -lcrypto \
 		$(LDFLAGS_EXTRA)
 
 $(TWO_MAN_TEST): test_2man_helpers.c ../pam_2man_totp/pam_2man_totp.c \
@@ -84,38 +87,42 @@ $(PRODUCTION_DIR)/pam_sandwich.so: ../pam-sandwich/pam_sandwich.c \
 		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
 	$(CC) $(MODULE_CFLAGS) -shared ../pam-sandwich/pam_sandwich.c \
 		../pam_common/totp_replay.c -o $@ -lpam -loath -pthread \
-		$(LDFLAGS_EXTRA)
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_strict_totp.so: ../pam_strict_totp/pam_strict_totp.c \
 		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
 	$(CC) $(MODULE_CFLAGS) -shared ../pam_strict_totp/pam_strict_totp.c \
 		../pam_common/totp_replay.c -o $@ -lpam -loath -pthread \
-		$(LDFLAGS_EXTRA)
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_chronoguard.so: ../pam_chronoguard/pam_chronoguard.c | $(PRODUCTION_DIR)
 	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam \
-		$(LDFLAGS_EXTRA)
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_partial_key.so: ../pam_partial_key/pam_partial_key.c \
 		../pam_partial_key/keyfile.c ../pam_partial_key/keyfile.h | $(PRODUCTION_DIR)
 	$(CC) $(MODULE_CFLAGS) -shared ../pam_partial_key/pam_partial_key.c \
 		../pam_partial_key/keyfile.c -o $@ -lpam -lcrypto \
-		$(LDFLAGS_EXTRA)
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pk_manager: ../pam_partial_key/pk_manager.c | $(PRODUCTION_DIR)
-	$(CC) $(CFLAGS) $< -o $@ -lcrypto $(LDFLAGS_EXTRA)
+	$(CC) $(CFLAGS) $< -o $@ -pie -lcrypto $(HARDEN_LDFLAGS) \
+		$(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_school_schedule.so: ../pam_school_schedule/pam_school_schedule.c | $(PRODUCTION_DIR)
 	$(CC) -D_GNU_SOURCE $(MODULE_CFLAGS) -shared $< -o $@ -lpam \
-		$(LDFLAGS_EXTRA)
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_2man_totp.so: ../pam_2man_totp/pam_2man_totp.c \
 		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
 	$(CC) $(MODULE_CFLAGS) -shared ../pam_2man_totp/pam_2man_totp.c \
 		../pam_common/totp_replay.c -o $@ -lpam -loath -pthread \
-		$(LDFLAGS_EXTRA)
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
 
 production: $(PRODUCTION_ARTIFACTS)
+
+hardening: production
+	sh ./test_elf_hardening.sh $(PRODUCTION_ARTIFACTS)
 
 test: all $(PARSER_TEST) $(HELPER_TESTS) $(PK_MANAGER_TEST)
 	sh ./test_pam_stack.sh $(BUILD_DIR)
@@ -187,8 +194,8 @@ valgrind: all $(PARSER_TEST) $(HELPER_TESTS) $(PK_MANAGER_TEST)
 		sh ./test_pk_manager.sh $(PK_MANAGER_TEST)
 
 verify:
-	$(MAKE) BUILD_DIR=build/gcc CC=gcc test production
-	$(MAKE) BUILD_DIR=build/clang CC=clang test production
+	$(MAKE) BUILD_DIR=build/gcc CC=gcc test hardening
+	$(MAKE) BUILD_DIR=build/clang CC=clang test hardening
 	$(MAKE) BUILD_DIR=build/fuzz fuzz
 	$(MAKE) analyze
 	$(MAKE) analyze-production

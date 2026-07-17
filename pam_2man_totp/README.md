@@ -10,7 +10,9 @@ Este proyecto implementa un mecanismo de **Control Dual** (similar al lanzamient
 1.  **El Iniciador:** El usuario que solicita el acceso.
 2.  **El Autorizador:** Un segundo administrador (miembro del grupo `wheel`) que aprueba la solicitud en tiempo real.
 
-Diseñado bajo estándares **MISRA-C** y filosofía **OpenBSD Secure Coding**: Fail-Close, sin fugas de memoria, sin condiciones de carrera y mitigación de ataques de tiempo.
+Diseñado con criterios de **MISRA-C** y **OpenBSD Secure Coding**: Fail-Close,
+limpieza de memoria, protección anti-replay y mitigaciones frente a ataques de
+tiempo.
 
 ---
 
@@ -21,7 +23,7 @@ Diseñado bajo estándares **MISRA-C** y filosofía **OpenBSD Secure Coding**: F
 *   **Validación de Privilegios:** El Autorizador *debe* pertenecer al grupo `wheel` (o grupo administrativo configurado).
 *   **Privilege Separation:** El proceso "suelta" los privilegios de `root` (drop privileges) antes de leer los archivos secretos de los usuarios.
 *   **Memory Hardening:** Limpieza agresiva de memoria (Zeroization) de claves y buffers OTP inmediatamente después de su uso.
-*   **Anti-Timing Attacks:** Si un usuario no existe o no tiene fichero, el sistema simula verificaciones criptográficas para no revelar información a través del tiempo de respuesta.
+*   **Anti-Timing Attacks:** Si un usuario no existe, no es autorizador o no tiene fichero, el sistema ejecuta una verificación TOTP con un secreto ficticio válido antes de denegar.
 *   **Anti-replay entre procesos:** Cada contador aceptado se registra por módulo y UID bajo bloqueo exclusivo.
 
 ---

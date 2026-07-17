@@ -24,6 +24,12 @@
 #define TEMP_RANDOM_SIZE 8U
 #define TEMP_CREATE_ATTEMPTS 128U
 
+enum install_result {
+    INSTALL_FAILED = -1,
+    INSTALL_OK = 0,
+    INSTALL_DURABILITY_UNCONFIRMED = 1
+};
+
 static void secure_zero(void *value, size_t length)
 {
     if (value == NULL) return;
@@ -217,13 +223,25 @@ static int create_temporary_file(int directory_fd, char *name,
     return descriptor;
 }
 
+static int sync_directory(int directory_fd)
+{
+#ifdef PK_MANAGER_TESTING
+    const char *inject_failure = getenv("PK_MANAGER_TEST_FAIL_DIR_FSYNC");
+    if (inject_failure != NULL && strcmp(inject_failure, "1") == 0) {
+        errno = EIO;
+        return -1;
+    }
+#endif
+    return fsync(directory_fd);
+}
+
 static int install_key_file(const char *home_directory, const char *serialized,
                             size_t serialized_length)
 {
     char temporary_name[64];
     int directory_fd = -1;
     int temporary_fd = -1;
-    int result = -1;
+    int result = INSTALL_FAILED;
     mode_t old_mask = umask((mode_t)0077);
 
     memset(temporary_name, 0, sizeof(temporary_name));
@@ -244,11 +262,19 @@ static int install_key_file(const char *home_directory, const char *serialized,
     }
     temporary_fd = -1;
 
-    if (renameat(directory_fd, temporary_name, directory_fd, KEY_FILE) != 0 ||
-        fsync(directory_fd) != 0) {
+    if (renameat(directory_fd, temporary_name, directory_fd, KEY_FILE) != 0) {
         goto cleanup;
     }
-    result = 0;
+    temporary_name[0] = '\0';
+    if (sync_directory(directory_fd) != 0) {
+        /*
+         * renameat() has already replaced the key.  Reporting a plain install
+         * failure would incorrectly suggest that the previous key remains.
+         */
+        result = INSTALL_DURABILITY_UNCONFIRMED;
+        goto cleanup;
+    }
+    result = INSTALL_OK;
 
 cleanup:
     if (temporary_fd >= 0) close(temporary_fd);
@@ -271,6 +297,7 @@ int main(void)
     const char *home_directory = getenv("HOME");
     size_t password_length = 0U;
     size_t serialized_length = 0U;
+    int install_status;
     int result = EXIT_FAILURE;
 
     memset(password, 0, sizeof(password));
@@ -310,7 +337,16 @@ int main(void)
         fputs("Error: cryptographic key generation failed.\n", stderr);
         goto cleanup;
     }
-    if (install_key_file(home_directory, serialized, serialized_length) != 0) {
+    install_status = install_key_file(home_directory, serialized,
+                                      serialized_length);
+    if (install_status == INSTALL_DURABILITY_UNCONFIRMED) {
+        fputs("Error: the key file was replaced, but directory durability "
+              "could not be confirmed; do not assume the previous key "
+              "remains installed.\n",
+              stderr);
+        goto cleanup;
+    }
+    if (install_status != INSTALL_OK) {
         fputs("Error: the key file could not be installed atomically.\n",
               stderr);
         goto cleanup;

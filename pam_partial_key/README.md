@@ -25,6 +25,12 @@ memoria y lo instala mediante un fichero temporal privado y un `rename` atómico
 El resultado pertenece al usuario que ejecuta el programa y tiene permisos
 `0600`.
 
+Si el `rename` ya ha reemplazado la clave pero el sistema no puede confirmar la
+durabilidad del directorio mediante `fsync`, el gestor termina con error y avisa
+explícitamente de que la clave anterior puede haber sido sustituida. En ese
+caso, verifica `~/.partial_key` antes de cerrar sesiones activas o repetir la
+operación.
+
 ## Configuración PAM
 
 Ejemplo para `/etc/pam.d/sshd`:

@@ -4,6 +4,13 @@ Este repositorio contiene implementaciones experimentales y educativas de módul
 
 El objetivo es demostrar diferentes estrategias de integración de códigos OTP y variables de tiempo en el flujo de autenticación de SSH y login local.
 
+> **Compatibilidad:** varios módulos leen ficheros de usuario mediante cambios
+> temporales de EUID, EGID y grupos. Ese modelo está orientado a consumidores PAM
+> aislados por proceso, como los flujos habituales de SSH o `sudo`; no debe
+> asumirse seguro para una aplicación multihilo sin rediseñar primero el acceso a
+> credenciales. `pam_partial_key` también crea un proceso auxiliar y mantiene la
+> misma restricción de despliegue.
+
 ## 📂 Estructura del Proyecto
 
 El repositorio se divide en seis módulos independientes, cada uno con su propia lógica de seguridad y experiencia de usuario (UX):

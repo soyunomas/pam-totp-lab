@@ -30,6 +30,15 @@ run_manager() {
     fi
 }
 
+run_manager_capture_error() {
+    password=$1
+    home_dir=$2
+    error_file=$3
+    printf '%s\n' "$password" | env HOME="$home_dir" \
+        PK_MANAGER_TEST_FAIL_DIR_FSYNC=1 "$manager" > /dev/null \
+        2> "$error_file"
+}
+
 home_valid="$test_root/valid"
 mkdir "$home_valid"
 run_manager "abcdefgh" "$home_valid"
@@ -63,5 +72,22 @@ run_manager "abcdefgh" "$home_symlink"
 [ -f "$home_symlink/.partial_key" ]
 [ ! -L "$home_symlink/.partial_key" ]
 [ "$(stat -c '%a' "$home_symlink/.partial_key")" = "600" ]
+
+home_uncertain="$test_root/uncertain"
+mkdir "$home_uncertain"
+printf '%s\n' "previous-key" > "$home_uncertain/.partial_key"
+error_uncertain="$test_root/uncertain.err"
+if run_manager_capture_error "abcdefgh" "$home_uncertain" \
+        "$error_uncertain"; then
+    echo "directory fsync failure was reported as success" >&2
+    exit 1
+fi
+if grep -F "previous-key" "$home_uncertain/.partial_key" >/dev/null; then
+    echo "directory fsync test did not cross the rename boundary" >&2
+    exit 1
+fi
+grep -F "was replaced" "$error_uncertain" >/dev/null
+grep -F "do not assume the previous key remains" "$error_uncertain" \
+    >/dev/null
 
 echo "All partial-key manager tests passed."

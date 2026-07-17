@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define THREAD_COUNT 8
 
@@ -17,6 +18,21 @@ static void *check_root_group(void *unused)
 int main(void)
 {
     pthread_t threads[THREAD_COUNT];
+    char fake_secret[256] = {0};
+
+    if (initialize_fake_secret(fake_secret, sizeof(fake_secret)) != 0 ||
+        strcmp(fake_secret, FAKE_TOTP_SECRET) != 0) {
+        fputs("fake TOTP secret could not be initialized\n", stderr);
+        return EXIT_FAILURE;
+    }
+    {
+        uint64_t counter = UINT64_C(0);
+        if (verify_totp("invalid-authorizer", fake_secret, "000000", 1,
+                        &counter) != PAM_AUTH_ERR) {
+            fputs("fake TOTP verification was accepted\n", stderr);
+            return EXIT_FAILURE;
+        }
+    }
 
     if (!is_user_privileged("root", "root")) {
         fputs("root was not recognized in its primary group\n", stderr);

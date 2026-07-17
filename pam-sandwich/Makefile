@@ -11,7 +11,7 @@ CC          := gcc
 # Se añade -Werror para cumplir Regla 30 (0 warnings permitidos)
 # Se añade -fno-stack-protector para evitar conflictos con símbolos de PAM en algunos sistemas
 CFLAGS      := -fPIC -fstack-protector-all -Wall -Wextra -Werror -O2
-LDFLAGS     := -shared -lpam -loath -pthread
+LDFLAGS     := -shared -Wl,-z,relro,-z,now -lpam -loath -pthread
 
 # Detección automática del directorio de seguridad de PAM
 ifneq ("$(wildcard /lib/x86_64-linux-gnu/security/.)","")

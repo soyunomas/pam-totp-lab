@@ -14,6 +14,7 @@ Run the baseline tests with:
 make -C tests test
 make -C tests analyze
 make -C tests valgrind
+make -C tests hardening
 ```
 
 The phase-one parser tests exercise valid boundary sizes, malformed fields,
@@ -62,14 +63,17 @@ make -C tests verify
 ```
 
 The matrix also tests `pk_manager`'s atomic installation, including mode `0600`,
-overlong-password rejection, and replacement of a symlink without modifying its
-target.
+overlong-password rejection, replacement of a symlink without modifying its
+target, and the explicit result returned when `rename()` succeeds but directory
+durability cannot be confirmed.
 
 It runs the isolated stack and parser tests with GCC and Clang, builds every
 production artifact away from the source directories, fuzzes the partial-key
 parser, runs Clang Static Analyzer, checks the harness and parser with Valgrind,
-and executes the tests under AddressSanitizer and UndefinedBehaviorSanitizer.
-There are no warning exceptions in either production build.
+executes the tests under AddressSanitizer and UndefinedBehaviorSanitizer, and
+verifies Full RELRO, immediate binding, a non-executable stack, and the absence
+of RPATH, RUNPATH, and TEXTREL metadata on every production ELF. There are no
+warning exceptions in either production build.
 
 Some restricted sandboxes deny `dlopen()` of the fixture module. In that case
 the isolated stack tests must run outside that sandbox; they still use only a

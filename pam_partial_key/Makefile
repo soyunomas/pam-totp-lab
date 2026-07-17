@@ -11,9 +11,9 @@ CC          := gcc
 # Regla 30: Zero Warnings. -Werror es obligatorio.
 CFLAGS      := -fPIC -fstack-protector-all -Wall -Wextra -Werror -O2
 # Flags para el módulo PAM (.so)
-LDFLAGS_PAM := -shared -lpam -lcrypto
+LDFLAGS_PAM := -shared -Wl,-z,relro,-z,now -lpam -lcrypto
 # Flags para la herramienta de gestión (binario normal)
-LDFLAGS_BIN := -lcrypto
+LDFLAGS_BIN := -pie -Wl,-z,relro,-z,now -lcrypto
 
 # Detección automática del directorio de seguridad de PAM
 ifneq ("$(wildcard /lib/x86_64-linux-gnu/security/.)","")

@@ -52,6 +52,7 @@
 #define FAIL_DELAY_MS       3000000
 #define MAX_USERNAME_LEN    255U
 #define MAX_NSS_BUFFER      (1024U * 1024U)
+#define FAKE_TOTP_SECRET    "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 
 static pthread_once_t oath_once = PTHREAD_ONCE_INIT;
 static int oath_init_status = OATH_CRYPTO_ERROR;
@@ -123,6 +124,13 @@ static int safe_strcpy(char *dest, size_t size, const char *src) {
         return -1;
     }
     return 0;
+}
+
+static int initialize_fake_secret(char *secret_buf, size_t buf_size)
+{
+    if (secret_buf == NULL || buf_size == 0U) return -1;
+    memset(secret_buf, 0, buf_size);
+    return safe_strcpy(secret_buf, buf_size, FAKE_TOTP_SECRET);
 }
 
 /* --- CORE LOGIC --- */
@@ -207,9 +215,10 @@ static secure_status_t load_user_secret(const char *username, char *secret_buf,
     int fd = -1;
     
     *fake_mode_out = 1;
-    memset(secret_buf, 0, buf_size);
     /* Pre-fill with valid fake data for constant time ops */
-    safe_strcpy(secret_buf, buf_size, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+    if (initialize_fake_secret(secret_buf, buf_size) != 0) {
+        return STATUS_ERR_SYSTEM;
+    }
 
     long bufsize_sys = sysconf(_SC_GETPW_R_SIZE_MAX);
     if (bufsize_sys == -1) bufsize_sys = 16384;
@@ -380,7 +389,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     memset(secret1, 0, sizeof(secret1));
-    memset(secret2, 0, sizeof(secret2));
+    if (initialize_fake_secret(secret2, sizeof(secret2)) != 0) {
+        return PAM_AUTH_ERR;
+    }
 
     /* --- FASE 1: INICIADOR (User 1) --- */
     if (pam_get_user(pamh, &user1, NULL) != PAM_SUCCESS || user1 == NULL) {

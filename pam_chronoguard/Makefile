@@ -6,7 +6,7 @@ BINARY_NAME := pam_chronoguard.so
 CC          := gcc
 # Flags de seguridad + Thread Safety (_REENTRANT)
 CFLAGS      := -fPIC -fstack-protector-all -Wall -Wextra -Werror -O2 -D_REENTRANT
-LDFLAGS     := -shared -lpam
+LDFLAGS     := -shared -Wl,-z,relro,-z,now -lpam
 
 # Detección automática del directorio de librerías PAM
 ifneq ("$(wildcard /lib/x86_64-linux-gnu/security/.)","")
