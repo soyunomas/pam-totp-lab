@@ -71,6 +71,20 @@ static void secure_free(void **ptr, size_t size) {
     }
 }
 
+static int restore_privileges(uid_t uid, gid_t gid, int group_count,
+                               const gid_t *groups)
+{
+    int failed = 0;
+    if (seteuid(uid) != 0) failed = 1;
+    if (setegid(gid) != 0) failed = 1;
+    if (group_count > 0 && groups != NULL) {
+        if (setgroups(group_count, groups) != 0) failed = 1;
+    } else if (setgroups(0, NULL) != 0) {
+        failed = 1;
+    }
+    return failed ? -1 : 0;
+}
+
 /* =========================================================================
  * LÓGICA DE RECUPERACIÓN DE SECRETOS (PRIVILEGE SEPARATION)
  * ========================================================================= */
@@ -111,8 +125,17 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
     
     int original_ngroups = getgroups(0, NULL);
     gid_t *original_groups = NULL;
+
+    if (original_ngroups < 0) {
+        secure_free((void**)&buf_pwd, 0);
+        return SECRET_ERROR;
+    }
     
     if (original_ngroups > 0) {
+        if ((size_t)original_ngroups > SIZE_MAX / sizeof(gid_t)) {
+            secure_free((void**)&buf_pwd, 0);
+            return SECRET_ERROR;
+        }
         original_groups = malloc((size_t)original_ngroups * sizeof(gid_t));
         if (!original_groups) {
             secure_free((void**)&buf_pwd, 0);
@@ -130,7 +153,10 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
     if (initgroups(username, pwd.pw_gid) != 0 ||
         setegid(pwd.pw_gid) != 0 ||
         seteuid(pwd.pw_uid) != 0) {
-        
+        if (restore_privileges(old_uid, old_gid, original_ngroups,
+                               original_groups) != 0) {
+            abort();
+        }
         secure_free((void**)&buf_pwd, 0);
         if (original_groups) free(original_groups);
         return -1;
@@ -138,7 +164,7 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
 
     /* 3. LECTURA SEGURA (RACE CONDITION FREE) */
     /* REGLA 12: O_NOFOLLOW evita ataques de symlink */
-    int fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
     FILE *fp = NULL;
 
     if (fd == -1 && errno == ENOENT) {
@@ -172,27 +198,11 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
     /* Si fallamos al restaurar root, debemos MATAR el proceso.
        No podemos dejar que PAM continúe con identidad incorrecta. */
     
-    if (seteuid(old_uid) != 0) {
+    if (restore_privileges(old_uid, old_gid, original_ngroups,
+                           original_groups) != 0) {
         syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore EUID. Aborting execution.");
         if (fp) fclose(fp);
         abort(); /* PRINCIPIO 2: Fail-Safe / Fail-Close */
-    }
-
-    if (setegid(old_gid) != 0) {
-         syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore EGID. Aborting execution.");
-         if (fp) fclose(fp);
-         abort();
-    }
-
-    if (original_ngroups > 0 && original_groups) {
-        if (setgroups(original_ngroups, original_groups) != 0) {
-            syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore groups. Aborting execution.");
-            if (fp) fclose(fp);
-            abort();
-        }
-    } else {
-        /* Si no había grupos extra, limpiamos los del usuario */
-        setgroups(0, NULL); 
     }
 
     /* Limpieza de recursos auxiliares */

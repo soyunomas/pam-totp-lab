@@ -20,6 +20,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>     
+#include <stdint.h>
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
 
@@ -36,6 +37,20 @@ static void secure_memzero(void *s, size_t n) {
     volatile unsigned char *p = (volatile unsigned char *)s;
     while (n--) *p++ = 0;
     __asm__ __volatile__("" : : "r"(s) : "memory");
+}
+
+static int restore_privileges(uid_t uid, gid_t gid, int group_count,
+                               const gid_t *groups)
+{
+    int failed = 0;
+    if (seteuid(uid) != 0) failed = 1;
+    if (setegid(gid) != 0) failed = 1;
+    if (group_count > 0 && groups != NULL) {
+        if (setgroups(group_count, groups) != 0) failed = 1;
+    } else if (setgroups(0, NULL) != 0) {
+        failed = 1;
+    }
+    return failed ? -1 : 0;
 }
 
 /* CONSTRUCTOR DE TIEMPO DINÁMICO */
@@ -126,24 +141,38 @@ static int get_user_config(const char *username, char *pre_fmt, char *post_fmt, 
     /* Guardamos grupos para restaurar, pero no inicializamos grupos nuevos innecesariamente */
     int groups_n = getgroups(0, NULL);
     gid_t *groups = NULL;
+
+    if (groups_n < 0) { free(buf); return -1; }
     
     if (groups_n > 0) {
+        if ((size_t)groups_n > SIZE_MAX / sizeof(gid_t)) {
+            free(buf);
+            return -1;
+        }
         groups = malloc(groups_n * sizeof(gid_t));
         if (!groups) { free(buf); return -1; }
         if (getgroups(groups_n, groups) == -1) { free(buf); free(groups); return -1; }
     }
 
-    /* Drop temporal a usuario para leer su archivo */
-    /* FIX: No usamos initgroups() aqui, solo necesitamos el UID/GID efectivo para leer el archivo */
+    /* Eliminar grupos suplementarios antes de cambiar la identidad efectiva. */
+    if (setgroups(0, NULL) != 0) {
+        free(buf); if (groups) free(groups); return -1;
+    }
+
+    /* Drop temporal a usuario para leer su archivo. */
     if (setegid(pwd.pw_gid) != 0 || seteuid(pwd.pw_uid) != 0) {
+        if (restore_privileges(old_uid, old_gid, groups_n, groups) != 0) {
+            abort();
+        }
         free(buf); if(groups) free(groups); return -1;
     }
 
-    FILE *fp = fopen(path, "r");
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    FILE *fp = fd >= 0 ? fdopen(fd, "r") : NULL;
     int file_missing = 0;
     int success = 0;
 
-    if (fp == NULL && errno == ENOENT) {
+    if (fd < 0 && errno == ENOENT) {
         file_missing = 1;
     }
     
@@ -173,22 +202,17 @@ static int get_user_config(const char *username, char *pre_fmt, char *post_fmt, 
             }
         }
         fclose(fp);
+    } else if (fd >= 0) {
+        close(fd);
     }
 
     /* Restaurar privilegios (Fail-Close: abortar si falla) */
-    if (seteuid(old_uid) != 0 || setegid(old_gid) != 0) { 
+    if (restore_privileges(old_uid, old_gid, groups_n, groups) != 0) {
         /* Regla 2: Fail-Safe. Si no podemos recuperar root, morimos. */
         abort(); 
     }
     
-    /* Restaurar grupos si los hubiere */
-    if (groups) { 
-        if (setgroups(groups_n, groups) != 0) abort(); 
-        free(groups); 
-    } else {
-        /* Si no habia grupos extra, limpiamos */
-        setgroups(0, NULL);
-    }
+    free(groups);
     /* --- FIN ZONA CRÍTICA --- */
 
     free(buf);

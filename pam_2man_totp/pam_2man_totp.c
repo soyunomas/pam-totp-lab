@@ -79,6 +79,20 @@ static void secure_free(void **ptr, size_t size) {
     }
 }
 
+static int restore_privileges(uid_t uid, gid_t gid, int group_count,
+                               const gid_t *groups)
+{
+    int failed = 0;
+    if (seteuid(uid) != 0) failed = 1;
+    if (setegid(gid) != 0) failed = 1;
+    if (group_count > 0 && groups != NULL) {
+        if (setgroups(group_count, groups) != 0) failed = 1;
+    } else if (setgroups(0, NULL) != 0) {
+        failed = 1;
+    }
+    return failed ? -1 : 0;
+}
+
 static int safe_strcpy(char *dest, size_t size, const char *src) {
     if (!dest || !src || size == 0) return -1;
     dest[0] = '\0';
@@ -153,7 +167,15 @@ static secure_status_t load_user_secret(const char *username, char *secret_buf, 
     gid_t root_gid = getegid();
     int ngroups = getgroups(0, NULL);
     gid_t *groups = NULL;
+    if (ngroups < 0) {
+        secure_free((void**)&buf_pwd, (size_t)bufsize_sys);
+        return STATUS_ERR_SYSTEM;
+    }
     if (ngroups > 0) {
+        if ((size_t)ngroups > SIZE_MAX / sizeof(gid_t)) {
+            secure_free((void**)&buf_pwd, (size_t)bufsize_sys);
+            return STATUS_ERR_SYSTEM;
+        }
         groups = malloc((size_t)ngroups * sizeof(gid_t));
         if (!groups) {
              secure_free((void**)&buf_pwd, (size_t)bufsize_sys);
@@ -170,14 +192,16 @@ static secure_status_t load_user_secret(const char *username, char *secret_buf, 
     if (initgroups(username, pwd.pw_gid) != 0 || 
         setegid(pwd.pw_gid) != 0 || 
         seteuid(pwd.pw_uid) != 0) {
-        
+        if (restore_privileges(root_uid, root_gid, ngroups, groups) != 0) {
+            abort();
+        }
         secure_free((void**)&buf_pwd, (size_t)bufsize_sys);
         if (groups) free(groups);
         return STATUS_ERR_SYSTEM;
     }
 
     /* Open File */
-    fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
     
     if (fd == -1) {
         if (errno == ENOENT) status = STATUS_NOT_FOUND;
@@ -216,12 +240,7 @@ static secure_status_t load_user_secret(const char *username, char *secret_buf, 
     }
 
     /* RESTORE PRIVILEGES */
-    int restore_fail = 0;
-    if (seteuid(root_uid) != 0) restore_fail = 1;
-    if (setegid(root_gid) != 0) restore_fail = 1;
-    if (groups && setgroups(ngroups, groups) != 0) restore_fail = 1;
-
-    if (restore_fail) abort();
+    if (restore_privileges(root_uid, root_gid, ngroups, groups) != 0) abort();
 
     if (groups) free(groups);
     secure_free((void**)&buf_pwd, (size_t)bufsize_sys);
