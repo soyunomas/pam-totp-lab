@@ -6,198 +6,42 @@ on:
       - PAM security verification
     types:
       - completed
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/update-schedule-override-todo.yml
 
 permissions:
   contents: write
 
 jobs:
   update:
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      (github.event_name == 'pull_request' &&
+       github.actor == 'soyunomas' &&
+       github.head_ref == 'docs/schedule-totp-override' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout repository
+      - name: Checkout target branch
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || 'main' }}
           fetch-depth: 0
 
-      - name: Add schedule TOTP override proposal
-        shell: python
+      - name: Apply deterministic TODO patch
         run: |
-          from pathlib import Path
-
-          path = Path("TODO_AUTHENTICATION_IDEAS.md")
-          text = path.read_text(encoding="utf-8")
-
-          heading = "## 11. `pam_schedule_totp_override`: excepción horaria autorizada por profesor"
-          if heading in text:
-              raise SystemExit(0)
-
-          priority_anchor = "| 10 | `pam_totp_duress` | Investigación | Media | Sí |\n"
-          priority_row = "| 11 | `pam_schedule_totp_override` | Alto | Baja-media | Sí |\n"
-          if priority_anchor not in text:
-              raise SystemExit("priority anchor not found")
-          text = text.replace(priority_anchor, priority_anchor + priority_row, 1)
-
-          section = r'''
-## 11. `pam_schedule_totp_override`: excepción horaria autorizada por profesor
-
-### Idea
-
-Combinar una política horaria normal con una excepción TOTP supervisada. Cada cuenta puede autenticarse sin excepción únicamente durante su franja asignada:
-
-```text
-usuario A → mañana
-usuario B → tarde
-usuario C → noche
-```
-
-Fuera de esa franja, la contraseña habitual no basta. El módulo solicita un TOTP adicional controlado por el profesor:
-
-```text
-usuario B intenta entrar por la mañana
-    ├── contraseña correcta
-    ├── horario ordinario denegado
-    └── TOTP de excepción para B → acceso excepcional
-```
-
-El objetivo es autorizar exámenes, recuperaciones o actividades extraordinarias sin modificar temporalmente el horario general ni revelar un secreto permanente nuevo al alumno.
-
-### Diseño recomendado
-
-La primera versión debe ser un módulo de autenticación combinado y fail-closed:
-
-1. Obtener usuario, servicio y hora desde fuentes confiables de PAM y del sistema.
-2. Validar la contraseña mediante el módulo normal del stack.
-3. Comprobar la franja configurada para la cuenta.
-4. Si está dentro de horario, devolver éxito sin solicitar TOTP de excepción.
-5. Si está fuera de horario, solicitar un TOTP de profesor específico para esa cuenta.
-6. Consumir el contador mediante estado antirreplay separado por usuario y servicio.
-7. Registrar únicamente que se utilizó una excepción, nunca el código ni el secreto.
-
-No debe utilizarse un único secreto TOTP global. Un código global podría autorizar cualquier cuenta durante la misma ventana temporal. La configuración recomendada utiliza un secreto distinto por cuenta protegida:
-
-```text
-/etc/security/pam-schedule-override/
-├── A.secret
-├── B.secret
-└── C.secret
-```
-
-Los archivos serán propiedad de `root`, regulares, sin enlaces y con permisos estrictos. El profesor tendrá las entradas correspondientes en una aplicación TOTP estándar:
-
-```text
-Centro - Excepción A
-Centro - Excepción B
-Centro - Excepción C
-```
-
-### Configuración conceptual
-
-```text
-/etc/security/pam-schedule-override.conf
-```
-
-```text
-user=A;days=Mo-Fr;time=0800-1400;override=A.secret
-user=B;days=Mo-Fr;time=1400-2000;override=B.secret
-user=C;days=Mo-Fr;time=2000-2359;override=C.secret
-```
-
-La sintaxis real deberá ser pequeña, versionada, sin expresiones ambiguas y con una política explícita para zonas horarias, cambios de hora y días festivos.
-
-### Experiencia de usuario
-
-Dentro del horario ordinario:
-
-```text
-Password:
-```
-
-Fuera del horario:
-
-```text
-Password:
-Acceso fuera de horario. Código de autorización docente:
-```
-
-Por seguridad operativa, es preferible que el profesor introduzca el código directamente o supervise su uso. Dictarlo al alumno permite que sea reenviado durante su breve periodo de validez.
-
-### Desarrollo
-
-- [ ] `SCHEDOVR-01` Definir una lista cerrada de usuarios o grupos sujetos a la política.
-- [ ] `SCHEDOVR-02` Implementar franjas sin solapamientos ambiguos y con límites exactos.
-- [ ] `SCHEDOVR-03` Obtener fecha y hora del sistema sin confiar en variables del cliente.
-- [ ] `SCHEDOVR-04` Exigir un secreto de excepción diferente por cuenta o ámbito autorizado.
-- [ ] `SCHEDOVR-05` Guardar configuración y secretos únicamente en archivos protegidos por `root`.
-- [ ] `SCHEDOVR-06` Validar TOTP estándar con una ventana pequeña.
-- [ ] `SCHEDOVR-07` Mantener antirreplay por usuario, servicio, secreto y contador.
-- [ ] `SCHEDOVR-08` Aplicar rate limiting a los intentos fuera de horario.
-- [ ] `SCHEDOVR-09` Registrar usuario, servicio, instante y resultado sin registrar credenciales.
-- [ ] `SCHEDOVR-10` Definir rotación y revocación inmediata de secretos docentes.
-- [ ] `SCHEDOVR-11` Probar cambios de hora, reloj adelantado o atrasado y cruces de medianoche.
-- [ ] `SCHEDOVR-12` Documentar que la política se comprueba al autenticar y no finaliza sesiones ya abiertas.
-
-### Pruebas de aceptación
-
-- [ ] A puede entrar por la mañana sin TOTP de excepción.
-- [ ] B no puede entrar por la mañana usando solo la contraseña compartida.
-- [ ] B puede entrar por la mañana con el TOTP específico de B.
-- [ ] El TOTP de A no autoriza a B ni a C.
-- [ ] Un TOTP aceptado no puede reutilizarse en otro intento o servicio.
-- [ ] Un secreto ausente, corrupto o con permisos inseguros produce denegación.
-- [ ] Una configuración horaria solapada, incompleta o inválida produce denegación.
-- [ ] Los intentos concurrentes no aceptan dos veces el mismo contador.
-- [ ] Los logs permiten auditar la excepción sin revelar el código.
-- [ ] Cambiar la hora del cliente no altera la decisión del servidor.
-
-### Ventajas
-
-- Reutiliza aplicaciones TOTP estándar y no necesita red ni daemon.
-- Mantiene horarios estables y permite excepciones inmediatas.
-- Un secreto por cuenta limita el alcance de una filtración.
-- El antirreplay y la auditoría permiten investigar usos excepcionales.
-- Es sencillo para un centro con pocas cuentas compartidas o funcionales.
-
-### Inconvenientes y límites
-
-- Una contraseña conocida por todos no identifica a la persona real. Cualquier alumno puede intentar usar cualquier cuenta cuya contraseña conozca.
-- El TOTP autoriza una excepción, pero no corrige la falta de atribución causada por las contraseñas compartidas.
-- Un código dictado puede reenviarse o utilizarse por otra persona mientras siga vigente.
-- El compromiso del teléfono del profesor afecta todas las cuentas enroladas en ese dispositivo.
-- Requiere sincronización horaria, protección antirreplay y rate limiting.
-- PAM normalmente evalúa la política al iniciar la sesión; no expulsa automáticamente una sesión cuando termina la franja.
-- Varios profesores necesitan un procedimiento controlado de enrolamiento, baja y rotación.
-
-### Variante preferible para mayor atribución
-
-Para una versión posterior, una utilidad administrativa podría crear un permiso local de un solo uso, ligado a usuario, servicio, fecha, terminal y expiración. El profesor autorizaría exactamente a B para el examen concreto, evitando que un TOTP genérico pueda reenviarse a otra cuenta. Esta variante añade estado y complejidad, pero expresa mejor una autorización que un TOTP estándar.
-
-### Valor de seguridad
-
-Alto como control de política y autorización excepcional en un entorno pequeño. No debe presentarse como identificación individual mientras las contraseñas sigan siendo compartidas. Su principal beneficio es impedir el acceso fuera de horario sin presencia o autorización del profesor.
-
-'''
-          marker = "---\n\n## Ideas descartadas inicialmente"
-          if marker not in text:
-              raise SystemExit("section marker not found")
-          text = text.replace(marker, section + "---\n\n## Ideas descartadas inicialmente", 1)
-
-          phase_anchor = "3. `pam_totp_duress`\n"
-          phase_entry = "4. `pam_schedule_totp_override`\n"
-          if phase_anchor not in text:
-              raise SystemExit("phase anchor not found")
-          text = text.replace(phase_anchor, phase_anchor + phase_entry, 1)
-
-          result_anchor = "pam_totp_duress\n    └── detección local de coacción\n"
-          result_entry = "\npam_schedule_totp_override\n    └── excepción horaria autorizada por profesor\n"
-          if result_anchor not in text:
-              raise SystemExit("result anchor not found")
-          text = text.replace(result_anchor, result_anchor + result_entry, 1)
-
-          path.write_text(text, encoding="utf-8")
+          git fetch origin main
+          git show origin/main:.github/scripts/add_schedule_override_todo.py > /tmp/add_schedule_override_todo.py
+          python /tmp/add_schedule_override_todo.py
 
       - name: Commit documentation update
+        env:
+          TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.head_ref || 'main' }}
         run: |
           if git diff --quiet -- TODO_AUTHENTICATION_IDEAS.md; then
             exit 0
@@ -206,4 +50,4 @@ Alto como control de política y autorización excepcional en un entorno pequeñ
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add TODO_AUTHENTICATION_IDEAS.md
           git commit -m "docs: add schedule TOTP override proposal"
-          git push origin HEAD:main
+          git push origin "HEAD:${TARGET_BRANCH}"
