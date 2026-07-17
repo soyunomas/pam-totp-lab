@@ -4,6 +4,7 @@
 
 # Nombre del binario final
 BINARY_NAME := pam_sandwich.so
+COMMON_SOURCE := ../pam_common/totp_replay.c
 
 # Compilador y Flags de Seguridad (Audit Hardened)
 CC          := gcc
@@ -60,7 +61,7 @@ deps:
 # --- COMPILACIÓN ---
 build:
 	@echo "${BLUE}[*] Compilando $(BINARY_NAME) con flags de seguridad...${RESET}"
-	$(CC) $(CFLAGS) -o $(BINARY_NAME) pam_sandwich.c $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(BINARY_NAME) pam_sandwich.c $(COMMON_SOURCE) $(LDFLAGS)
 	@echo "${GREEN}[OK] Compilación exitosa (Zero Warnings).${RESET}"
 
 # --- INSTALACIÓN ---

@@ -33,6 +33,8 @@
 /* Cabecera para TOTP (liboath) */
 #include <liboath/oath.h>
 
+#include "../pam_common/totp_replay.h"
+
 /* CONSTANTES DE SEGURIDAD */
 #define SECRET_FILE ".google_authenticator"
 #define MIN_SECRET_LEN 16
@@ -107,7 +109,8 @@ static int restore_privileges(uid_t uid, gid_t gid, int group_count,
  * LÓGICA DE RECUPERACIÓN DE SECRETOS (PRIVILEGE SEPARATION)
  * ========================================================================= */
 
-static int get_user_secret(const char *username, char *secret_buf, size_t buf_size) {
+static int get_user_secret(const char *username, char *secret_buf,
+                           size_t buf_size, uid_t *uid_out) {
     int retval = SECRET_ERROR;
     int file_missing = 0;
     long bufsize_pwd = sysconf(_SC_GETPW_R_SIZE_MAX);
@@ -128,6 +131,7 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
         secure_free((void**)&buf_pwd, 0);
         return -1;
     }
+    *uid_out = pwd.pw_uid;
 
     char filepath[PATH_MAX];
     /* REGLA 1: Detección de truncamiento en rutas */
@@ -289,6 +293,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     size_t secret_binary_len = 0;
     size_t prompt_resp_len = 0;
     size_t total_len = 0;
+    uid_t user_id = (uid_t)0;
+    uint64_t otp_counter = UINT64_C(0);
     
     int retval = PAM_AUTH_ERR;
 
@@ -302,7 +308,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
     /* 2. OBTENER SECRETO (FAIL-CLOSE) */
     int secret_status = get_user_secret(username, secret_base32,
-                                        sizeof(secret_base32));
+                                        sizeof(secret_base32), &user_id);
     if (secret_status == SECRET_NOT_FOUND && nullok) {
         return PAM_IGNORE;
     }
@@ -384,7 +390,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
                              now, TOTP_WINDOW, 
                              0, /* start offset time */ 
                              1, /* window size steps */
-                             NULL, NULL, 
+                             NULL, &otp_counter,
                              token_str);
     
     /* Borrar secreto binario y token reconstruido de RAM */
@@ -392,6 +398,17 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     secure_memzero(token_str, sizeof(token_str));
 
     if (rc < 0) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
+    int replay_status = totp_replay_check_and_store(
+        "pam_sandwich", user_id, otp_counter);
+    if (replay_status != TOTP_REPLAY_ACCEPTED) {
+        syslog(replay_status == TOTP_REPLAY_DETECTED ? LOG_NOTICE : LOG_ERR,
+               "PAM-TOTP: %s TOTP counter for user %s",
+               replay_status == TOTP_REPLAY_DETECTED ? "Replayed" :
+                                                       "Could not persist",
+               username);
         retval = PAM_AUTH_ERR;
         goto cleanup;
     }

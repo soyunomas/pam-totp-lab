@@ -4,6 +4,7 @@
 
 BINARY_NAME := pam_2man_totp.so
 SOURCE_NAME := pam_2man_totp.c
+COMMON_SOURCE := ../pam_common/totp_replay.c
 CC          := gcc
 # Security: Stack protection, PIE, Fortify Source, Strict Warnings
 CFLAGS      := -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
@@ -49,7 +50,7 @@ deps:
 
 build:
 	@echo "${BLUE}[*] Compilando $(BINARY_NAME) desde $(SOURCE_NAME)...${RESET}"
-	$(CC) $(CFLAGS) -o $(BINARY_NAME) $(SOURCE_NAME) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(BINARY_NAME) $(SOURCE_NAME) $(COMMON_SOURCE) $(LDFLAGS)
 	@echo "${GREEN}[OK] Compilación exitosa.${RESET}"
 
 install: build

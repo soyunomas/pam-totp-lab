@@ -42,6 +42,8 @@
 #include <security/pam_ext.h>
 #include <liboath/oath.h>
 
+#include "../pam_common/totp_replay.h"
+
 /* --- CONFIGURATION CONSTANTS --- */
 #define SECRET_FILENAME     ".google_authenticator"
 #define PRIVILEGED_GROUP    "wheel"
@@ -150,7 +152,9 @@ static int is_user_privileged(const char *username, const char *groupname) {
  * Returns STATUS_OK if loaded.
  * Returns error otherwise.
  */
-static secure_status_t load_user_secret(const char *username, char *secret_buf, size_t buf_size, int *fake_mode_out) {
+static secure_status_t load_user_secret(const char *username, char *secret_buf,
+                                        size_t buf_size, int *fake_mode_out,
+                                        uid_t *uid_out) {
     secure_status_t status = STATUS_ERR_SYSTEM;
     struct passwd pwd;
     struct passwd *result = NULL;
@@ -174,6 +178,7 @@ static secure_status_t load_user_secret(const char *username, char *secret_buf, 
         secure_free((void**)&buf_pwd, (size_t)bufsize_sys);
         return STATUS_ERR_AUTH; 
     }
+    *uid_out = pwd.pw_uid;
 
     if (snprintf(filepath, sizeof(filepath), "%s/%s", pwd.pw_dir, SECRET_FILENAME) >= (int)sizeof(filepath)) {
         secure_free((void**)&buf_pwd, (size_t)bufsize_sys);
@@ -266,10 +271,15 @@ static secure_status_t load_user_secret(const char *username, char *secret_buf, 
     return status;
 }
 
-static int verify_totp(const char *username, const char *secret_base32, const char *input_code, int fake_mode) {
+static int verify_totp(const char *username, const char *secret_base32,
+                       const char *input_code, int fake_mode,
+                       uint64_t *counter_out) {
     char *secret_bin = NULL;
     size_t secret_bin_len = 0;
     int rc;
+
+    if (counter_out == NULL) return PAM_AUTH_ERR;
+    *counter_out = UINT64_C(0);
 
     size_t input_len = strnlen(input_code, 9U);
     if (input_len < 6U || input_len > 8U) return PAM_AUTH_ERR;
@@ -288,7 +298,8 @@ static int verify_totp(const char *username, const char *secret_base32, const ch
         secure_free((void**)&secret_bin, secret_bin_len);
         return PAM_AUTH_ERR;
     }
-    rc = oath_totp_validate3(secret_bin, secret_bin_len, now, TOTP_STEP, 0, TOTP_WINDOW, NULL, NULL, input_code);
+    rc = oath_totp_validate3(secret_bin, secret_bin_len, now, TOTP_STEP, 0,
+                             TOTP_WINDOW, NULL, counter_out, input_code);
     secure_free((void**)&secret_bin, secret_bin_len);
 
     if (rc >= 0 && !fake_mode) return PAM_SUCCESS;
@@ -306,6 +317,10 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     char secret1[256];
     char secret2[256];
     int fake1 = 1, fake2 = 1;
+    uid_t user1_id = (uid_t)0;
+    uid_t user2_id = (uid_t)0;
+    uint64_t counter1 = UINT64_C(0);
+    uint64_t counter2 = UINT64_C(0);
     int ret;
     int final_result = PAM_AUTH_ERR;
     int nullok = 0;
@@ -335,7 +350,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         return PAM_AUTH_ERR;
     }
 
-    status1 = load_user_secret(user1, secret1, sizeof(secret1), &fake1);
+    status1 = load_user_secret(user1, secret1, sizeof(secret1), &fake1,
+                               &user1_id);
     
     /* Handle nullok: If user has no secret, bypass the whole module */
     if (status1 == STATUS_NOT_FOUND && nullok) {
@@ -355,9 +371,19 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (otp1 != NULL) otp1_len = strnlen(otp1, PAM_MAX_RESP_SIZE);
     if (ret != PAM_SUCCESS || otp1 == NULL) goto cleanup;
 
-    if (verify_totp(user1, secret1, otp1, fake1) != PAM_SUCCESS) {
+    if (verify_totp(user1, secret1, otp1, fake1, &counter1) != PAM_SUCCESS) {
         syslog(LOG_WARNING, "PAM_2MAN: User %s TOTP failed", user1);
         final_result = PAM_AUTH_ERR;
+        goto cleanup;
+    }
+    int replay_status = totp_replay_check_and_store(
+        "pam_2man_totp", user1_id, counter1);
+    if (replay_status != TOTP_REPLAY_ACCEPTED) {
+        syslog(replay_status == TOTP_REPLAY_DETECTED ? LOG_NOTICE : LOG_ERR,
+               "PAM_2MAN: %s TOTP counter for user %s",
+               replay_status == TOTP_REPLAY_DETECTED ? "Replayed" :
+                                                       "Could not persist",
+               user1);
         goto cleanup;
     }
 
@@ -379,7 +405,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         fake2 = 1; 
     } else {
         /* User 2 MUST have secret. nullok does not apply to Approver */
-        load_user_secret(user2_input, secret2, sizeof(secret2), &fake2);
+        load_user_secret(user2_input, secret2, sizeof(secret2), &fake2,
+                         &user2_id);
     }
 
     char prompt_u2[128];
@@ -392,9 +419,20 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (otp2 != NULL) otp2_len = strnlen(otp2, PAM_MAX_RESP_SIZE);
     if (ret != PAM_SUCCESS || otp2 == NULL) goto cleanup;
 
-    if (verify_totp(user2_input, secret2, otp2, fake2) == PAM_SUCCESS) {
-        syslog(LOG_NOTICE, "PAM_2MAN: Dual Auth Success (%s + %s)", user1, user2_input);
-        final_result = PAM_SUCCESS;
+    if (verify_totp(user2_input, secret2, otp2, fake2, &counter2) == PAM_SUCCESS) {
+        replay_status = totp_replay_check_and_store(
+            "pam_2man_totp", user2_id, counter2);
+        if (replay_status == TOTP_REPLAY_ACCEPTED) {
+            syslog(LOG_NOTICE, "PAM_2MAN: Dual Auth Success (%s + %s)", user1, user2_input);
+            final_result = PAM_SUCCESS;
+        } else {
+            syslog(replay_status == TOTP_REPLAY_DETECTED ? LOG_NOTICE : LOG_ERR,
+                   "PAM_2MAN: %s TOTP counter for authorizer %s",
+                   replay_status == TOTP_REPLAY_DETECTED ? "Replayed" :
+                                                           "Could not persist",
+                   user2_input);
+            final_result = PAM_AUTH_ERR;
+        }
     } else {
         syslog(LOG_WARNING, "PAM_2MAN: Authorizer %s TOTP failed", user2_input);
         final_result = PAM_AUTH_ERR;

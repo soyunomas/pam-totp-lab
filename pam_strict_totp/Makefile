@@ -3,6 +3,7 @@
 # ==============================================================================
 
 BINARY_NAME := pam_strict_totp.so
+COMMON_SOURCE := ../pam_common/totp_replay.c
 CC          := gcc
 CFLAGS      := -fPIC -fstack-protector-all -Wall -Wextra -Werror -O2
 LDFLAGS     := -shared -lpam -loath -pthread
@@ -46,7 +47,7 @@ deps:
 
 build:
 	@echo "${BLUE}[*] Compilando $(BINARY_NAME)...${RESET}"
-	$(CC) $(CFLAGS) -o $(BINARY_NAME) pam_strict_totp.c $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(BINARY_NAME) pam_strict_totp.c $(COMMON_SOURCE) $(LDFLAGS)
 	@echo "${GREEN}[OK] Compilado.${RESET}"
 
 install: build

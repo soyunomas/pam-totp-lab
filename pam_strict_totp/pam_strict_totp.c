@@ -45,6 +45,8 @@
 #include <security/pam_ext.h>
 #include <liboath/oath.h>
 
+#include "../pam_common/totp_replay.h"
+
 #define SECRET_FILE ".google_authenticator"
 #define MIN_SECRET_LEN 16
 #define MAX_SECRET_LEN 128
@@ -108,7 +110,8 @@ static int restore_privileges(uid_t uid, gid_t gid, int group_count,
     return failed ? -1 : 0;
 }
 
-static int get_user_secret(const char *username, char *secret_buf, size_t buf_size) {
+static int get_user_secret(const char *username, char *secret_buf,
+                           size_t buf_size, uid_t *uid_out) {
     int retval = SECRET_ERROR;
     
     long bufsize_pwd = sysconf(_SC_GETPW_R_SIZE_MAX);
@@ -125,6 +128,7 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
         secure_free((void**)&buf_pwd, (size_t)bufsize_pwd);
         return SECRET_ERROR;
     }
+    *uid_out = pwd.pw_uid;
 
     char filepath[PATH_MAX];
     if (snprintf(filepath, sizeof(filepath), "%s/%s", pwd.pw_dir, SECRET_FILE) >= (int)sizeof(filepath)) {
@@ -247,6 +251,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     size_t otp_input_len = 0;
     int retval = PAM_AUTH_ERR;
     int nullok = 0;
+    uid_t user_id = (uid_t)0;
+    uint64_t otp_counter = UINT64_C(0);
 
     for (int i = 0; i < argc; i++) {
         if (argv[i] && strcmp(argv[i], "nullok") == 0) {
@@ -261,7 +267,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         return PAM_AUTH_ERR;
     }
 
-    int secret_status = get_user_secret(username, secret_base32, sizeof(secret_base32));
+    int secret_status = get_user_secret(username, secret_base32,
+                                        sizeof(secret_base32), &user_id);
 
     int fake_mode = 0;
     if (secret_status != SECRET_OK) {
@@ -319,11 +326,22 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
                              TOTP_STEP_SIZE,   /* PASO DE TIEMPO (30s) */
                              0,                /* Inicio (0) */
                              TOTP_WINDOW,      /* VENTANA (1 paso extra) */
-                             NULL, NULL, 
+                             NULL, &otp_counter,
                              otp_input);
 
     if (rc >= 0 && !fake_mode) {
-        retval = PAM_SUCCESS;
+        int replay_status = totp_replay_check_and_store(
+            "pam_strict_totp", user_id, otp_counter);
+        if (replay_status == TOTP_REPLAY_ACCEPTED) {
+            retval = PAM_SUCCESS;
+        } else {
+            syslog(replay_status == TOTP_REPLAY_DETECTED ? LOG_NOTICE : LOG_ERR,
+                   "PAM-TOTP: %s TOTP counter for user %s",
+                   replay_status == TOTP_REPLAY_DETECTED ? "Replayed" :
+                                                           "Could not persist",
+                   username);
+            retval = PAM_AUTH_ERR;
+        }
     } else {
         retval = PAM_AUTH_ERR;
         if (!fake_mode) syslog(LOG_NOTICE, "PAM-TOTP: Invalid OTP attempt for user %s", username);

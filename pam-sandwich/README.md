@@ -9,10 +9,18 @@ El módulo espera que la entrada de contraseña tenga el siguiente formato:
 
 Utiliza `liboath` para la validación TOTP y gestión estricta de permisos de archivo para el almacenamiento de secretos.
 
-La validación admite un paso de desfase en ambas direcciones. El módulo no
-persiste todavía el contador TOTP consumido, por lo que un código puede
-reutilizarse mientras permanezca en esa ventana. Una defensa anti-replay real
-requiere estado por usuario y actualización atómica entre procesos PAM.
+La validación admite un paso de desfase en ambas direcciones. Cada contador
+aceptado se registra por módulo y UID en `/run/pam-totp-lab/`, con bloqueo entre
+procesos, para impedir que el mismo código o uno anterior vuelva a aceptarse.
+El directorio y sus ficheros deben pertenecer a `root` y no ser accesibles por
+grupo ni por otros usuarios. Si el módulo no puede bloquear, validar o actualizar
+ese estado, la autenticación se deniega. Por ello, el consumidor PAM debe
+ejecutar el módulo con EUID 0.
+
+El estado reside en `/run` y se reinicia al arrancar el sistema. Esto no amplía
+la validez temporal del TOTP: tras el arranque vuelve a aplicarse la ventana
+normal de liboath y, desde la primera aceptación, el contador vuelve a avanzar
+de forma monotónica.
 
 ## Requisitos
 

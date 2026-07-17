@@ -22,6 +22,7 @@ Diseñado bajo estándares **MISRA-C** y filosofía **OpenBSD Secure Coding**: F
 *   **Privilege Separation:** El proceso "suelta" los privilegios de `root` (drop privileges) antes de leer los archivos secretos de los usuarios.
 *   **Memory Hardening:** Limpieza agresiva de memoria (Zeroization) de claves y buffers OTP inmediatamente después de su uso.
 *   **Anti-Timing Attacks:** Si un usuario no existe o no tiene fichero, el sistema simula verificaciones criptográficas para no revelar información a través del tiempo de respuesta.
+*   **Anti-replay entre procesos:** Cada contador aceptado se registra por módulo y UID bajo bloqueo exclusivo.
 
 ---
 
@@ -108,9 +109,18 @@ Reiniciar SSH: `sudo systemctl restart ssh`
 2.  **Log "Insecure permissions":** El archivo secreto tiene permisos `777` o grupo incorrecto. Ejecuta `chmod 600 ~/.google_authenticator`.
 3.  **Time Drift:** Los códigos TOTP fallan si el reloj del servidor tiene más de 30 segundos de desfase respecto al móvil. Usa NTP.
 
-> **Anti-replay:** no se guarda todavía el contador utilizado por cada usuario.
-> Evitar reutilizaciones requiere almacenamiento persistente y bloqueo atómico
-> compartido por todos los procesos PAM.
+> **Anti-replay:** el último contador aceptado de cada usuario se guarda en
+> `/run/pam-totp-lab/` y se actualiza bajo un bloqueo compartido por todos los
+> procesos PAM. Se rechaza el mismo contador o cualquiera anterior. El estado
+> debe ser propiedad de `root` y privado; si no puede abrirse, validarse,
+> bloquearse o actualizarse, se deniega toda la autenticación. El consumidor PAM
+> debe ejecutar el módulo con EUID 0. El estado es volátil y se reinicia al
+> arrancar el sistema.
+>
+> El código del iniciador se consume inmediatamente después de validarlo, antes
+> de pedir el autorizador. Si el segundo usuario falla o cancela, el iniciador
+> debe esperar al siguiente código. Esto evita que dos sesiones paralelas avancen
+> con el mismo primer TOTP.
 
 ### Auditoría (Logs)
 El módulo escribe en `/var/log/auth.log` (o `syslog`):

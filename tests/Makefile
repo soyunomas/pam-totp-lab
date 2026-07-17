@@ -17,7 +17,8 @@ PARSER_FUZZ := $(BUILD_DIR)/fuzz_partial_key_parser
 CHRONO_TEST := $(BUILD_DIR)/test_chronoguard_helpers
 SCHOOL_TEST := $(BUILD_DIR)/test_school_schedule_helpers
 LIBOATH_TEST := $(BUILD_DIR)/test_liboath_window
-HELPER_TESTS := $(CHRONO_TEST) $(SCHOOL_TEST) $(LIBOATH_TEST)
+REPLAY_TEST := $(BUILD_DIR)/test_totp_replay
+HELPER_TESTS := $(CHRONO_TEST) $(SCHOOL_TEST) $(LIBOATH_TEST) $(REPLAY_TEST)
 PRODUCTION_DIR := $(BUILD_DIR)/production
 PRODUCTION_ARTIFACTS := \
 	$(PRODUCTION_DIR)/pam_sandwich.so \
@@ -58,15 +59,24 @@ $(SCHOOL_TEST): test_school_schedule_helpers.c \
 $(LIBOATH_TEST): test_liboath_window.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< -o $@ -loath $(LDFLAGS_EXTRA)
 
+$(REPLAY_TEST): test_totp_replay.c ../pam_common/totp_replay.c \
+		../pam_common/totp_replay.h | $(BUILD_DIR)
+	$(CC) -DTOTP_REPLAY_TESTING $(CFLAGS) test_totp_replay.c \
+		../pam_common/totp_replay.c -o $@ $(LDFLAGS_EXTRA)
+
 $(PRODUCTION_DIR):
 	mkdir -p $@
 
-$(PRODUCTION_DIR)/pam_sandwich.so: ../pam-sandwich/pam_sandwich.c | $(PRODUCTION_DIR)
-	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam -loath -pthread \
+$(PRODUCTION_DIR)/pam_sandwich.so: ../pam-sandwich/pam_sandwich.c \
+		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
+	$(CC) $(MODULE_CFLAGS) -shared ../pam-sandwich/pam_sandwich.c \
+		../pam_common/totp_replay.c -o $@ -lpam -loath -pthread \
 		$(LDFLAGS_EXTRA)
 
-$(PRODUCTION_DIR)/pam_strict_totp.so: ../pam_strict_totp/pam_strict_totp.c | $(PRODUCTION_DIR)
-	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam -loath -pthread \
+$(PRODUCTION_DIR)/pam_strict_totp.so: ../pam_strict_totp/pam_strict_totp.c \
+		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
+	$(CC) $(MODULE_CFLAGS) -shared ../pam_strict_totp/pam_strict_totp.c \
+		../pam_common/totp_replay.c -o $@ -lpam -loath -pthread \
 		$(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_chronoguard.so: ../pam_chronoguard/pam_chronoguard.c | $(PRODUCTION_DIR)
@@ -86,8 +96,10 @@ $(PRODUCTION_DIR)/pam_school_schedule.so: ../pam_school_schedule/pam_school_sche
 	$(CC) -D_GNU_SOURCE $(MODULE_CFLAGS) -shared $< -o $@ -lpam \
 		$(LDFLAGS_EXTRA)
 
-$(PRODUCTION_DIR)/pam_2man_totp.so: ../pam_2man_totp/pam_2man_totp.c | $(PRODUCTION_DIR)
-	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam -loath -pthread \
+$(PRODUCTION_DIR)/pam_2man_totp.so: ../pam_2man_totp/pam_2man_totp.c \
+		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
+	$(CC) $(MODULE_CFLAGS) -shared ../pam_2man_totp/pam_2man_totp.c \
+		../pam_common/totp_replay.c -o $@ -lpam -loath -pthread \
 		$(LDFLAGS_EXTRA)
 
 production: $(PRODUCTION_ARTIFACTS)
@@ -98,6 +110,7 @@ test: all $(PARSER_TEST) $(HELPER_TESTS)
 	$(CHRONO_TEST)
 	$(SCHOOL_TEST)
 	$(LIBOATH_TEST)
+	$(REPLAY_TEST)
 
 fuzz: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/fuzz-artifacts
@@ -122,6 +135,9 @@ analyze:
 		-std=c11 -Wall -Wextra -Wpedantic test_school_schedule_helpers.c
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
 		-std=c11 -Wall -Wextra -Wpedantic test_liboath_window.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
+		-DTOTP_REPLAY_TESTING -std=c11 -Wall -Wextra -Wpedantic \
+		test_totp_replay.c ../pam_common/totp_replay.c
 
 analyze-production:
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam-sandwich/pam_sandwich.c
@@ -132,6 +148,7 @@ analyze-production:
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_partial_key/pk_manager.c
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_school_schedule/pam_school_schedule.c
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_2man_totp/pam_2man_totp.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_common/totp_replay.c
 
 valgrind: all $(PARSER_TEST) $(HELPER_TESTS)
 	PAM_HARNESS_RUNNER='valgrind --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite --error-exitcode=99 --suppressions=valgrind.supp' \
@@ -144,6 +161,8 @@ valgrind: all $(PARSER_TEST) $(HELPER_TESTS)
 		--errors-for-leak-kinds=definite --error-exitcode=99 $(SCHOOL_TEST)
 	valgrind --leak-check=full --show-leak-kinds=definite \
 		--errors-for-leak-kinds=definite --error-exitcode=99 $(LIBOATH_TEST)
+	valgrind --leak-check=full --show-leak-kinds=definite \
+		--errors-for-leak-kinds=definite --error-exitcode=99 $(REPLAY_TEST)
 
 verify:
 	$(MAKE) BUILD_DIR=build/gcc CC=gcc test production
