@@ -27,6 +27,8 @@
 #define CONFIG_FILE ".chronoguard"
 #define MAX_CONFIG_LINE 128
 #define MAX_TIME_BUFFER 64
+#define CONFIG_NOT_FOUND 1
+#define CONFIG_ERROR    (-1)
 
 /* REGLA 14: Limpieza segura de memoria (Anti-Forensic) */
 static void secure_memzero(void *s, size_t n) {
@@ -138,7 +140,12 @@ static int get_user_config(const char *username, char *pre_fmt, char *post_fmt, 
     }
 
     FILE *fp = fopen(path, "r");
+    int file_missing = 0;
     int success = 0;
+
+    if (fp == NULL && errno == ENOENT) {
+        file_missing = 1;
+    }
     
     if (fp) {
         struct stat st;
@@ -185,12 +192,21 @@ static int get_user_config(const char *username, char *pre_fmt, char *post_fmt, 
     /* --- FIN ZONA CRÍTICA --- */
 
     free(buf);
-    return success ? 0 : -1;
+    if (success) {
+        return 0;
+    }
+    return file_missing ? CONFIG_NOT_FOUND : CONFIG_ERROR;
 }
 
 /* PUNTO DE ENTRADA PRINCIPAL */
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-    (void)flags; (void)argc; (void)argv;
+    (void)flags;
+    int nullok = 0;
+    for (int i = 0; i < argc; i++) {
+        if (argv[i] != NULL && strcmp(argv[i], "nullok") == 0) {
+            nullok = 1;
+        }
+    }
     const char *username = NULL;
     const char *password = NULL;
     char *prompt_resp = NULL;
@@ -206,9 +222,12 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || !username) return PAM_AUTH_ERR;
 
-    /* Si no hay config, ignoramos (auth optional support) */
-    if (get_user_config(username, pre_fmt, post_fmt, sizeof(pre_fmt)) != 0) return PAM_IGNORE; 
-    if (strlen(pre_fmt) == 0 && strlen(post_fmt) == 0) return PAM_IGNORE;
+    /* Sólo la ausencia física se puede ignorar con nullok. */
+    int config_status = get_user_config(username, pre_fmt, post_fmt,
+                                        sizeof(pre_fmt));
+    if (config_status == CONFIG_NOT_FOUND && nullok) return PAM_IGNORE;
+    if (config_status != 0) return PAM_AUTH_ERR;
+    if (strlen(pre_fmt) == 0 && strlen(post_fmt) == 0) return PAM_AUTH_ERR;
 
     if (pam_get_item(pamh, PAM_AUTHTOK, (const void **)&password) != PAM_SUCCESS) return PAM_AUTH_ERR;
     

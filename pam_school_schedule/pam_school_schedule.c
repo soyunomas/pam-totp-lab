@@ -36,6 +36,8 @@
 #define CONFIG_FILE ".school_schedule"
 #define MAX_LINE_LEN 256
 #define MAX_TOKEN_LEN 64
+#define TOKEN_NOT_FOUND 1
+#define TOKEN_ERROR    (-1)
 /* Delay in microseconds for failed attempts (2 seconds) */
 #define AUTH_DELAY 2000000 
 
@@ -204,6 +206,7 @@ static int get_expected_token(const char *username, char *token_out, size_t toke
     if (fd >= 0) fp = fdopen(fd, "r");
 
     int found = 0;
+    int status = TOKEN_ERROR;
     if (fp) {
         struct stat st;
         if (fstat(fd, &st) == 0) {
@@ -238,7 +241,11 @@ static int get_expected_token(const char *username, char *token_out, size_t toke
         }
         fclose(fp);
     } else {
-         if (errno == ELOOP) syslog(LOG_ERR, "PAM_SCHOOL: Symlink attack on %s", filepath);
+         if (errno == ENOENT) {
+             status = TOKEN_NOT_FOUND;
+         } else if (errno == ELOOP) {
+             syslog(LOG_ERR, "PAM_SCHOOL: Symlink attack on %s", filepath);
+         }
     }
 
     /* RESTORE PRIVILEGES */
@@ -254,7 +261,7 @@ static int get_expected_token(const char *username, char *token_out, size_t toke
 
     secure_memzero(buf, (size_t)bufsize);
     free(buf);
-    return (found) ? 0 : -1;
+    return found ? 0 : status;
 }
 
 /*
@@ -309,7 +316,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
            - If 'nullok' is ON: We behave as requested (Allow access).
            - If 'nullok' is OFF: We MUST FAKE the auth to prevent timing attacks.
         */
-        if (nullok) {
+        if (config_result == TOKEN_NOT_FOUND && nullok) {
             return PAM_IGNORE; 
         }
 

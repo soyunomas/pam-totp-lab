@@ -68,6 +68,14 @@ Para instrucciones detalladas sobre cómo editar `/etc/pam.d/sshd` y `/etc/ssh/s
 make hints
 ```
 
+Si el usuario no tiene `.google_authenticator`, el módulo deniega el acceso
+por defecto. Añade `nullok` explícitamente en la línea PAM sólo si quieres que
+la ausencia del archivo deje continuar la pila:
+
+```text
+auth required pam_sandwich.so nullok
+```
+
 ## Licencia
 
 Este proyecto se distribuye bajo la licencia MIT. Consulta el archivo `LICENSE` para más detalles.

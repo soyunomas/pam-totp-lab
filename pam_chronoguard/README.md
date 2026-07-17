@@ -46,6 +46,14 @@ Añade la siguiente línea **AL PRINCIPIO** del archivo (antes de `@include comm
 auth required pam_chronoguard.so
 ```
 
+La ausencia de `.chronoguard` deniega el acceso por defecto. Para permitir un
+despliegue gradual, usa `nullok` explícitamente; sólo la ausencia real del
+archivo se considera ignorable, no un archivo inseguro o malformado:
+
+```pam
+auth required pam_chronoguard.so nullok
+```
+
 **Nota:** Si añades `auth optional`, el módulo no bloqueará el acceso si el usuario no tiene configuración, permitiendo un despliegue gradual.
 
 ## 👤 Configuración del Usuario
@@ -108,4 +116,3 @@ Para eliminar el módulo del sistema:
 sudo make uninstall
 ```
 Recuerda eliminar la línea añadida en `/etc/pam.d/sshd`.
-

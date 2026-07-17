@@ -42,6 +42,8 @@
 #define TOTP_PREFIX_LEN 3
 #define TOTP_SUFFIX_LEN 3
 #define TOTP_FULL_LEN   (TOTP_PREFIX_LEN + TOTP_SUFFIX_LEN)
+#define SECRET_NOT_FOUND 1
+#define SECRET_ERROR    (-1)
 
 /* =========================================================================
  * FUNCIONES AUXILIARES DE SEGURIDAD (HARDENED)
@@ -74,7 +76,8 @@ static void secure_free(void **ptr, size_t size) {
  * ========================================================================= */
 
 static int get_user_secret(const char *username, char *secret_buf, size_t buf_size) {
-    int retval = -1;
+    int retval = SECRET_ERROR;
+    int file_missing = 0;
     long bufsize_pwd = sysconf(_SC_GETPW_R_SIZE_MAX);
     if (bufsize_pwd == -1) bufsize_pwd = 16384;
 
@@ -137,6 +140,10 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
     /* REGLA 12: O_NOFOLLOW evita ataques de symlink */
     int fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     FILE *fp = NULL;
+
+    if (fd == -1 && errno == ENOENT) {
+        file_missing = 1;
+    }
 
     if (fd != -1) {
         struct stat st;
@@ -212,6 +219,8 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
             }
         }
         fclose(fp);
+    } else if (file_missing) {
+        retval = SECRET_NOT_FOUND;
     }
 
     /* En caso de error general, asegurar buffer limpio */
@@ -227,7 +236,13 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
  * ========================================================================= */
 
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-    (void)flags; (void)argc; (void)argv;
+    (void)flags;
+    int nullok = 0;
+    for (int i = 0; i < argc; i++) {
+        if (argv[i] != NULL && strcmp(argv[i], "nullok") == 0) {
+            nullok = 1;
+        }
+    }
 
     const char *username = NULL;
     const char *input_pass = NULL; 
@@ -255,8 +270,13 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     /* 2. OBTENER SECRETO (FAIL-CLOSE) */
-    if (get_user_secret(username, secret_base32, sizeof(secret_base32)) != 0) {
-        return PAM_IGNORE; 
+    int secret_status = get_user_secret(username, secret_base32,
+                                        sizeof(secret_base32));
+    if (secret_status == SECRET_NOT_FOUND && nullok) {
+        return PAM_IGNORE;
+    }
+    if (secret_status != 0) {
+        return PAM_AUTH_ERR;
     }
 
     /* 3. OBTENER INPUT (PASSWORD + SANDWICH TOTP) */
