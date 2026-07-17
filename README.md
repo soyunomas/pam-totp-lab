@@ -1,97 +1,130 @@
 # 🧪 PAM TOTP Lab
 
-Este repositorio contiene implementaciones experimentales y educativas de módulos **PAM (Pluggable Authentication Modules)** para Linux, enfocadas en autenticación de doble factor, controles contextuales y experimentos de interfaz alrededor de TOTP.
+Colección experimental y educativa de módulos **PAM (Pluggable Authentication Modules)** para Linux. El repositorio explora autenticación TOTP, políticas temporales y desafíos locales sin convertir el laboratorio en una plataforma distribuida.
 
-El objetivo es demostrar estrategias locales y auditables para integrar códigos OTP, políticas temporales y desafíos interactivos en flujos como SSH, `sudo` y login local.
+> **Compatibilidad:** varios módulos leen archivos de usuario mediante cambios temporales de EUID, EGID y grupos. Ese modelo está orientado a consumidores PAM aislados por proceso, como los flujos habituales de SSH o `sudo`; no debe asumirse seguro para una aplicación multihilo sin rediseñar primero el acceso a credenciales. `pam_partial_key` también crea un proceso auxiliar y mantiene la misma restricción de despliegue.
 
-> **Compatibilidad:** varios módulos leen ficheros de usuario mediante cambios
-> temporales de EUID, EGID y grupos. Ese modelo está orientado a consumidores PAM
-> aislados por proceso, como los flujos habituales de SSH o `sudo`; no debe
-> asumirse seguro para una aplicación multihilo sin rediseñar primero el acceso a
-> credenciales. `pam_partial_key` también crea un proceso auxiliar y mantiene la
-> misma restricción de despliegue.
+## Estado de integración
 
-## 📂 Estructura del proyecto
+| Implementación | Estado | Documentación |
+| :--- | :--- | :--- |
+| `pam-sandwich` | Integrada en `main` | [README](./pam-sandwich/README.md) |
+| `pam_strict_totp` | Integrada en `main` | [README](./pam_strict_totp/README.md) |
+| `pam_totp_domains` | PR #2 abierta | [PR #2](https://github.com/soyunomas/pam-totp-lab/pull/2) |
+| `pam_totp_shuffle` | PR #3 abierta | [PR #3](https://github.com/soyunomas/pam-totp-lab/pull/3) |
+| `pam_totp_slot_challenge` | Integrada en `main` | [README](./pam_totp_slot_challenge/README.md) |
+| `pam_chronoguard` | Integrada en `main` | [README](./pam_chronoguard/README.md) |
+| `pam_partial_key` | Integrada en `main` | [README](./pam_partial_key/README.md) |
+| `pam_school_schedule` | Integrada en `main` | [README](./pam_school_schedule/README.md) |
+| `pam_2man_totp` | Integrada en `main` | [README](./pam_2man_totp/README.md) |
 
-El repositorio se divide en siete módulos independientes:
+## 📂 Implementaciones
 
-### 1. 🥪 `pam-sandwich`
+### 1. `pam-sandwich`
 
-Oculta un TOTP estándar dentro de la contraseña para clientes con conversaciones PAM limitadas.
+Inserta un TOTP estándar alrededor de la contraseña para clientes con interfaces limitadas.
 
-* **Formato:** `[3 dígitos] + [Contraseña] + [3 dígitos]`.
-* **Documentación:** [pam-sandwich](./pam-sandwich/README.md).
+- Formato: `[3 dígitos] + [contraseña] + [3 dígitos]`.
+- Alcance: compatibilidad y ofuscación; no sustituye un flujo MFA explícito.
 
-### 2. 🛡️ `pam_strict_totp`
+### 2. `pam_strict_totp`
 
-Implementación endurecida del flujo TOTP clásico con prompts separados.
+Implementación endurecida del desafío TOTP clásico.
 
-* **Características:** fail-close, lectura segura del secreto, limpieza de memoria y antirreplay.
-* **Documentación:** [pam_strict_totp](./pam_strict_totp/README.md).
+- Contraseña y TOTP en prompts separados.
+- Fail-closed, limpieza de memoria y antirreplay local.
 
-### 3. 🔀 `pam_totp_shuffle`
+### 3. `pam_totp_domains`
 
-Solicita los seis dígitos de un TOTP estándar en un orden aleatorio y reconstruye el código antes de validarlo.
+Utiliza un secreto TOTP diferente según el servicio indicado por `PAM_SERVICE`.
 
-* **Ejemplo:** orden `4-1-6-2-5-3`; para `123456`, la respuesta es `416253`.
-* **Alcance:** experimento de interfaz frente a observaciones parciales; no añade un factor ni aumenta la seguridad criptográfica de TOTP.
-* **Documentación:** [pam_totp_shuffle](./pam_totp_shuffle/README.md).
+- Dominios cerrados para `sshd`, `sudo`, `login` y `su`.
+- Secretos separados en `~/.pam_totp_domains/`.
+- Antirreplay independiente por usuario y servicio.
+- Limita el impacto transversal de la filtración de un único secreto.
 
-### 4. ⏳ `pam_chronoguard`
+### 4. `pam_totp_shuffle`
 
-Aplica reglas temporales personalizables alrededor de una credencial.
+Solicita los seis dígitos de un TOTP en un orden aleatorio y reconstruye internamente el código original.
 
-* **Formato:** `[Prefijo temporal] + [Contraseña] + [Sufijo temporal]`.
-* **Documentación:** [pam_chronoguard](./pam_chronoguard/README.md).
+- Permutación uniforme mediante `getrandom()`.
+- Ejemplo: orden `4-1-6-2-5-3`; para `123456`, la respuesta es `416253`.
+- Es un experimento de interfaz frente a observaciones parciales; no añade un factor ni aumenta la seguridad criptográfica de TOTP.
 
-### 5. 🏦 `pam_partial_key`
+### 5. `pam_totp_slot_challenge`
 
-Solicita posiciones aleatorias de una clave y utiliza hashing posicional.
+Selecciona aleatoriamente uno de 2–4 secretos TOTP de un mismo usuario.
 
-* **Límite:** no es MFA; observaciones repetidas pueden revelar posiciones reutilizables.
-* **Documentación:** [pam_partial_key](./pam_partial_key/README.md).
+- Slots cerrados `A–D`.
+- Lectura segura de `~/.pam_totp_slots/*.secret`.
+- Antirreplay independiente por slot.
+- No es un quorum ni un factor adicional.
 
-### 6. 🏫 `pam_school_schedule`
+### 6. `pam_chronoguard`
 
-Restringe la autenticación según una agenda o franja horaria local.
+Aplica prefijos y sufijos derivados del tiempo a una contraseña.
 
-* **Objetivo:** impedir accesos fuera de periodos autorizados.
-* **Documentación:** [pam_school_schedule](./pam_school_schedule/README.md).
+- Configuración local de patrones como `PRE=HH` y `POST=DD`.
+- Mecanismo experimental de ofuscación temporal.
 
-### 7. 👥 `pam_2man_totp`
+### 7. `pam_partial_key`
 
-Requiere la autenticación TOTP secuencial de dos usuarios distintos.
+Solicita posiciones aleatorias de una clave maestra.
 
-* **Objetivo:** aplicar control dual en operaciones críticas.
-* **Documentación:** [pam_2man_totp](./pam_2man_totp/README.md).
+- Hashing posicional y comparación de tiempo constante.
+- No es MFA; observaciones repetidas pueden revelar posiciones.
 
----
+### 8. `pam_school_schedule`
+
+Autoriza según una agenda local y variables temporales.
+
+- Diseñado para laboratorios o accesos restringidos por horario.
+- Falla de forma cerrada si la configuración no es válida.
+
+### 9. `pam_2man_totp`
+
+Requiere la autenticación secuencial de dos usuarios distintos.
+
+- TOTP del iniciador y de un autorizador privilegiado.
+- Orientado a operaciones donde una sola persona no debe actuar sola.
 
 ## ⚡ Comparativa rápida
 
-| Módulo | Tecnología base | UX | Dependencia principal | Mitigación o propósito |
-| :--- | :--- | :--- | :--- | :--- |
-| `pam-sandwich` | TOTP | Un prompt combinado | App TOTP | Compatibilidad con clientes limitados |
-| `pam_strict_totp` | TOTP | Dos prompts | App TOTP | Fuerza bruta y repetición |
-| `pam_totp_shuffle` | TOTP permutado | Desafío de orden | App TOTP | Observación parcial de la entrada |
-| `pam_chronoguard` | Patrón temporal | Un prompt | Regla temporal | Observación parcial y acceso contextual |
-| `pam_partial_key` | Hash posicional | Desafío | Clave mental | Captura parcial por keylogger |
-| `pam_school_schedule` | Agenda y reloj | Prompt contextual | Configuración local | Acceso fuera de horario |
-| `pam_2man_totp` | TOTP dual | Cuatro pasos | Dos personas | Amenaza interna individual |
-
----
+| Módulo | Tecnología | Interacción | Mitigación o experimento principal |
+| :--- | :--- | :--- | :--- |
+| `pam-sandwich` | TOTP combinado | Un prompt | Compatibilidad con clientes limitados |
+| `pam_strict_totp` | TOTP | Prompt TOTP estándar | Fuerza bruta y repetición |
+| `pam_totp_domains` | TOTP por servicio | Prompt del dominio | Compromiso transversal de un secreto |
+| `pam_totp_shuffle` | TOTP permutado | Desafío de orden | Observación parcial de la entrada |
+| `pam_totp_slot_challenge` | Varios TOTP | Un slot aleatorio | Compromiso aislado de un secreto |
+| `pam_chronoguard` | Patrón temporal | Un prompt | Observación parcial y variación temporal |
+| `pam_partial_key` | Hash posicional | Desafío de posiciones | Captura parcial por keylogger |
+| `pam_school_schedule` | Agenda y reloj | Prompt contextual | Acceso fuera de horario |
+| `pam_2man_totp` | TOTP dual | Cuatro pasos | Amenaza interna individual |
 
 ## 🛠️ Requisitos generales
 
+En Debian o Ubuntu:
+
 ```bash
 sudo apt update
-sudo apt install -y build-essential libpam0g-dev liboath-dev libssl-dev
+sudo apt install -y build-essential clang libpam0g-dev liboath-dev libssl-dev valgrind binutils
 ```
 
-La verificación completa del repositorio se ejecuta con:
+Verificación general del repositorio:
 
 ```bash
 make -C tests verify
 ```
 
-Los módulos que incluyen una puerta propia documentan también su objetivo `make verify` dentro de su carpeta.
+Puertas específicas disponibles cuando la carpeta correspondiente está presente:
+
+```bash
+make -C pam_totp_domains verify
+make -C pam_totp_shuffle verify
+make -C pam_totp_slot_challenge verify
+```
+
+## Advertencia de despliegue
+
+El repositorio es un laboratorio. No modifiques `common-auth` durante las primeras pruebas. Mantén una sesión administrativa o consola local abierta, realiza copias de la configuración de `/etc/pam.d/` y prueba primero con una cuenta no crítica.
