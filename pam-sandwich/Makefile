@@ -4,13 +4,14 @@
 
 # Nombre del binario final
 BINARY_NAME := pam_sandwich.so
+COMMON_SOURCE := ../pam_common/totp_replay.c
 
 # Compilador y Flags de Seguridad (Audit Hardened)
 CC          := gcc
 # Se añade -Werror para cumplir Regla 30 (0 warnings permitidos)
 # Se añade -fno-stack-protector para evitar conflictos con símbolos de PAM en algunos sistemas
 CFLAGS      := -fPIC -fstack-protector-all -Wall -Wextra -Werror -O2
-LDFLAGS     := -shared -lpam -loath
+LDFLAGS     := -shared -Wl,-z,relro,-z,now -lpam -loath -pthread
 
 # Detección automática del directorio de seguridad de PAM
 ifneq ("$(wildcard /lib/x86_64-linux-gnu/security/.)","")
@@ -60,7 +61,7 @@ deps:
 # --- COMPILACIÓN ---
 build:
 	@echo "${BLUE}[*] Compilando $(BINARY_NAME) con flags de seguridad...${RESET}"
-	$(CC) $(CFLAGS) -o $(BINARY_NAME) pam_sandwich.c $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(BINARY_NAME) pam_sandwich.c $(COMMON_SOURCE) $(LDFLAGS)
 	@echo "${GREEN}[OK] Compilación exitosa (Zero Warnings).${RESET}"
 
 # --- INSTALACIÓN ---

@@ -6,7 +6,7 @@ BINARY_NAME := pam_school_schedule.so
 CC          := gcc
 # Flags de seguridad estricta
 CFLAGS      := -fPIC -fstack-protector-all -Wall -Wextra -Werror -O2 -D_GNU_SOURCE
-LDFLAGS     := -shared -lpam
+LDFLAGS     := -shared -Wl,-z,relro,-z,now -lpam
 
 # Detección de directorios
 ifneq ("$(wildcard /lib/x86_64-linux-gnu/security/.)","")

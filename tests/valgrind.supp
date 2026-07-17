@@ -1,0 +1,9 @@
+{
+   linux_pam_1_4_pam_start_confdir_confdir
+   Memcheck:Leak
+   match-leak-kinds: definite
+   fun:malloc
+   obj:*libpam.so*
+   obj:*libpam.so*
+   fun:main
+}

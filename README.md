@@ -4,6 +4,13 @@ Este repositorio contiene implementaciones experimentales y educativas de módul
 
 El objetivo es demostrar diferentes estrategias de integración de códigos OTP y variables de tiempo en el flujo de autenticación de SSH y login local.
 
+> **Compatibilidad:** varios módulos leen ficheros de usuario mediante cambios
+> temporales de EUID, EGID y grupos. Ese modelo está orientado a consumidores PAM
+> aislados por proceso, como los flujos habituales de SSH o `sudo`; no debe
+> asumirse seguro para una aplicación multihilo sin rediseñar primero el acceso a
+> credenciales. `pam_partial_key` también crea un proceso auxiliar y mantiene la
+> misma restricción de despliegue.
+
 ## 📂 Estructura del Proyecto
 
 El repositorio se divide en seis módulos independientes, cada uno con su propia lógica de seguridad y experiencia de usuario (UX):
@@ -35,7 +42,7 @@ Implementación del método clásico de autenticación parcial donde nunca se en
 *   **Mecanismo:** El sistema solicita caracteres en índices aleatorios (ej. "Introduce posiciones 2, 8 y 14").
 *   **Formato:** Prompt: `Posiciones [2] [8] [14]:` -> Input: `a 7 H`.
 *   **Caso de uso:** Entornos hostiles con alto riesgo de **Keyloggers**. Si un atacante captura las teclas, solo obtiene 3 caracteres desordenados inservibles para futuros intentos.
-*   **Seguridad:** Hashing posicional (SHA256 + Salt + Index), comparación de tiempo constante y protección contra Replay Attacks.
+*   **Seguridad:** Hashing posicional (SHA256 + Salt + Index) y comparación de tiempo constante. No es MFA y la repetición de posiciones puede permitir reutilizar respuestas observadas; consulta sus límites antes de desplegarlo.
 *   **🔗 [Ir a la documentación de pam_partial_key](./pam_partial_key/README.md)**
 
 ### 5. 🏫 `pam_school_schedule` (Estrategia de Horario Lectivo)

@@ -46,6 +46,14 @@ Añade la siguiente línea **AL PRINCIPIO** del archivo (antes de `@include comm
 auth required pam_chronoguard.so
 ```
 
+La ausencia de `.chronoguard` deniega el acceso por defecto. Para permitir un
+despliegue gradual, usa `nullok` explícitamente; sólo la ausencia real del
+archivo se considera ignorable, no un archivo inseguro o malformado:
+
+```pam
+auth required pam_chronoguard.so nullok
+```
+
 **Nota:** Si añades `auth optional`, el módulo no bloqueará el acceso si el usuario no tiene configuración, permitiendo un despliegue gradual.
 
 ## 👤 Configuración del Usuario
@@ -68,6 +76,9 @@ Cada usuario debe crear un archivo `.chronoguard` en su directorio `HOME`.
     *   `YY` : Año corto (24)
     *   `YYYY`: Año completo (2024)
     *   `WD` : Día de la semana (1=Lunes ... 7=Domingo)
+
+    Un valor no vacío debe contener al menos uno de estos tokens. Un formato que
+    sólo contenga texto desconocido se considera inválido y deniega el acceso.
 
     **Ejemplo 1 (Hora delante, Minuto detrás):**
     ```text
@@ -108,4 +119,3 @@ Para eliminar el módulo del sistema:
 sudo make uninstall
 ```
 Recuerda eliminar la línea añadida en `/etc/pam.d/sshd`.
-

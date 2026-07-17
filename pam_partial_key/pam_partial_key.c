@@ -1,242 +1,448 @@
 /*
  * pam_partial_key.c
- * Security: Strict Privilege Separation, Anti-Replay, Constant-Time Compare
- * Compliance: MISRA-C / CERT-C / OpenSSL 3.0
+ * Memory-safe parser and bounded challenge handling for a partial-key PAM.
  */
 #define _GNU_SOURCE
 #define _DEFAULT_SOURCE
-#include <security/pam_modules.h>
+
+#include "keyfile.h"
+
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <grp.h>
+#include <limits.h>
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <pwd.h>
 #include <security/pam_ext.h>
+#include <security/pam_modules.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <syslog.h>
-#include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
-#include <pwd.h>
-#include <grp.h> 
-#include <fcntl.h>
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#include <openssl/crypto.h> 
-#include <time.h>
-#include <errno.h>
+#include <unistd.h>
 
 #define KEY_FILE ".partial_key"
-#define CHALLENGE_COUNT 3
-#define SALT_LEN 16
+#define CHALLENGE_COUNT 3U
+#define MAX_RANDOM_ATTEMPTS 128U
+#define MAX_PASSWD_BUFFER (1024U * 1024U)
 
-/* REGLA 14: Limpieza Segura */
-static void secure_zero(void *s, size_t n) {
-    if(!s) return;
-    volatile unsigned char *p = s;
-    while (n--) *p++ = 0;
-}
-
-/* OpenSSL 3.0 Wrapper */
-static void calc_hash(unsigned char *out, const unsigned char *salt, int index, char c) {
-    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
-    if (!mdctx) return; 
-
-    unsigned int md_len;
-    if(EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL)) {
-        EVP_DigestUpdate(mdctx, salt, SALT_LEN);
-        EVP_DigestUpdate(mdctx, &index, sizeof(int));
-        EVP_DigestUpdate(mdctx, &c, 1);
-        EVP_DigestFinal_ex(mdctx, out, &md_len);
+static void secure_zero(void *value, size_t length)
+{
+    if (value == NULL) {
+        return;
     }
-    EVP_MD_CTX_free(mdctx);
+
+    volatile unsigned char *bytes = value;
+    while (length > 0U) {
+        *bytes++ = 0U;
+        length--;
+    }
 }
 
-/* REGLA 7 & 25: Separación de Privilegios */
-static int get_user_key_data(const char *username, unsigned char *salt_out, char ***hashes_out, size_t *pass_len_out) {
-    int pipefd[2];
-    if (pipe(pipefd) == -1) return -1;
+static int calc_hash(unsigned char output[PK_HASH_LEN],
+                     const unsigned char salt[PK_SALT_LEN], int index,
+                     char character)
+{
+    EVP_MD_CTX *context = NULL;
+    unsigned int digest_length = 0U;
+    int result = -1;
 
-    struct passwd *pwd = getpwnam(username);
-    if (!pwd) { close(pipefd[0]); close(pipefd[1]); return -1; }
+    memset(output, 0, PK_HASH_LEN);
+    context = EVP_MD_CTX_new();
+    if (context == NULL) {
+        return -1;
+    }
 
-    pid_t pid = fork();
-    if (pid == -1) { close(pipefd[0]); close(pipefd[1]); return -1; }
+    if (EVP_DigestInit_ex(context, EVP_sha256(), NULL) == 1 &&
+        EVP_DigestUpdate(context, salt, PK_SALT_LEN) == 1 &&
+        EVP_DigestUpdate(context, &index, sizeof(index)) == 1 &&
+        EVP_DigestUpdate(context, &character, 1U) == 1 &&
+        EVP_DigestFinal_ex(context, output, &digest_length) == 1 &&
+        digest_length == PK_HASH_LEN) {
+        result = 0;
+    }
 
-    if (pid == 0) { // CHILD (Sandbox)
-        close(pipefd[0]);
-        
-        /* Drop Privileges Strict */
-        if (initgroups(username, pwd->pw_gid) != 0 || 
-            setgid(pwd->pw_gid) != 0 || 
-            setuid(pwd->pw_uid) != 0) {
-            _exit(1);
-        }
+    EVP_MD_CTX_free(context);
+    if (result != 0) {
+        secure_zero(output, PK_HASH_LEN);
+    }
+    return result;
+}
 
-        char path[512];
-        if (snprintf(path, sizeof(path), "%s/%s", pwd->pw_dir, KEY_FILE) >= (int)sizeof(path)) {
-            _exit(1); 
-        }
+static int write_all(int descriptor, const unsigned char *buffer,
+                     size_t length)
+{
+    size_t written = 0U;
 
-        /* REGLA 12: Race Condition Check */
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) _exit(1);
-
-        struct stat st;
-        if (fstat(fd, &st) != 0 || (st.st_mode & 0077) != 0) {
-            _exit(2); // Insecure permissions
-        }
-
-        FILE *fp = fdopen(fd, "r");
-        if (!fp) _exit(1);
-
-        char buffer[4096]; 
-        size_t n = fread(buffer, 1, sizeof(buffer)-1, fp);
-        if (n > 0) {
-            buffer[n] = 0;
-            if (write(pipefd[1], buffer, n) != (ssize_t)n) {
-                _exit(3); // Pipe error
+    while (written < length) {
+        ssize_t result = write(descriptor, buffer + written, length - written);
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
             }
-        }
-        
-        fclose(fp);
-        _exit(0);
-    } else { // PARENT (Root)
-        close(pipefd[1]);
-        char buffer[4096] = {0};
-        int status;
-        waitpid(pid, &status, 0);
-        
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            close(pipefd[0]);
             return -1;
         }
-
-        ssize_t bytes_read = read(pipefd[0], buffer, sizeof(buffer)-1);
-        close(pipefd[0]);
-
-        if (bytes_read <= 0) return -1;
-        buffer[bytes_read] = 0;
-
-        // Parse: LEN|SALT|HASHES
-        char *saveptr;
-        char *token = strtok_r(buffer, "|", &saveptr);
-        if (!token) return -1;
-        
-        *pass_len_out = (size_t)atoi(token);
-        if (*pass_len_out == 0 || *pass_len_out > 256) return -1;
-
-        token = strtok_r(NULL, "|", &saveptr);
-        if (!token || strlen(token) != SALT_LEN * 2) return -1;
-
-        for (int i = 0; i < SALT_LEN; i++) {
-            if (sscanf(token + 2*i, "%02hhx", &salt_out[i]) != 1) return -1;
+        if (result == 0) {
+            return -1;
         }
-
-        *hashes_out = calloc(*pass_len_out, sizeof(char*));
-        if (!*hashes_out) return -1;
-
-        for (size_t i = 0; i < *pass_len_out; i++) {
-            token = strtok_r(NULL, "|", &saveptr);
-            if (!token) return -1;
-            (*hashes_out)[i] = strdup(token);
-        }
-        return 0;
+        written += (size_t)result;
     }
+    return 0;
 }
 
-PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-    const char *user;
-    unsigned char salt[SALT_LEN];
-    char **stored_hashes = NULL;
-    size_t pass_len = 0;
-    int retval = PAM_AUTH_ERR;
+static int child_send_key_file(int output_fd, const char *path, uid_t owner)
+{
+    unsigned char buffer[PK_MAX_FILE_SIZE + 1U];
+    struct stat status;
+    size_t total = 0U;
+    int descriptor = -1;
+    int result = -1;
 
-    (void)flags; (void)argc; (void)argv;
-
-    if (pam_get_user(pamh, &user, NULL) != PAM_SUCCESS) return PAM_AUTH_ERR;
-
-    if (get_user_key_data(user, salt, &stored_hashes, &pass_len) != 0) {
-        return PAM_AUTH_ERR;
-    }
-
-    /* REGLA 17: Random Seguro (Rejection Sampling) */
-    int indices[CHALLENGE_COUNT];
-    unsigned char rand_buf[CHALLENGE_COUNT];
-    
-    if (RAND_bytes(rand_buf, CHALLENGE_COUNT) != 1) {
+    memset(buffer, 0, sizeof(buffer));
+    descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (descriptor < 0) {
         goto cleanup;
     }
 
-    for (int i = 0; i < CHALLENGE_COUNT; i++) {
-        int r, unique;
-        int attempts = 0;
-        do {
-            /* Si fallamos la unicidad, pedimos nuevo byte */
-            if (attempts > 0) RAND_bytes(&rand_buf[i], 1);
-            
-            r = rand_buf[i] % pass_len;
-            unique = 1;
-            for (int j = 0; j < i; j++) if (indices[j] == r) unique = 0;
-            attempts++;
-        } while (!unique && attempts < 100);
-        indices[i] = r;
-    }
-
-    char prompt[128];
-    snprintf(prompt, sizeof(prompt), "Posiciones [%d] [%d] [%d]: ", 
-             indices[0]+1, indices[1]+1, indices[2]+1);
-
-    char *resp = NULL;
-    if (pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &resp, "%s", prompt) != PAM_SUCCESS) {
+    if (fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_uid != owner || (status.st_mode & 0077) != 0) {
         goto cleanup;
     }
-    if (!resp) goto cleanup;
 
-    char clean_resp[CHALLENGE_COUNT + 1];
-    int clean_idx = 0;
-    for (int i = 0; resp[i] != '\0' && clean_idx < CHALLENGE_COUNT; i++) {
-        if (resp[i] != ' ' && resp[i] != '\t') {
-            clean_resp[clean_idx++] = resp[i];
+    while (total < sizeof(buffer)) {
+        ssize_t count = read(descriptor, buffer + total,
+                             sizeof(buffer) - total);
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            goto cleanup;
+        }
+        if (count == 0) {
+            break;
+        }
+        total += (size_t)count;
+    }
+
+    if (total == 0U || total > PK_MAX_FILE_SIZE ||
+        write_all(output_fd, buffer, total) != 0) {
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    if (descriptor >= 0) {
+        close(descriptor);
+    }
+    secure_zero(buffer, sizeof(buffer));
+    return result;
+}
+
+static int wait_for_child(pid_t child, int *status_out)
+{
+    pid_t result;
+    do {
+        result = waitpid(child, status_out, 0);
+    } while (result < 0 && errno == EINTR);
+    return result == child ? 0 : -1;
+}
+
+static int get_user_key_data(const char *username,
+                             struct pk_key_data *key_data)
+{
+    unsigned char serialized[PK_MAX_FILE_SIZE + 1U];
+    struct passwd password_entry;
+    struct passwd *password_result = NULL;
+    char path[PATH_MAX];
+    char *password_buffer = NULL;
+    long configured_size;
+    size_t password_buffer_size;
+    size_t total = 0U;
+    uid_t user_id;
+    gid_t group_id;
+    int pipe_fds[2] = {-1, -1};
+    int child_status = 0;
+    int read_failed = 0;
+    int result = -1;
+    int path_length;
+    pid_t child = -1;
+
+    if (username == NULL || key_data == NULL) {
+        return -1;
+    }
+    pk_key_data_clear(key_data);
+    memset(serialized, 0, sizeof(serialized));
+    memset(&password_entry, 0, sizeof(password_entry));
+
+    configured_size = sysconf(_SC_GETPW_R_SIZE_MAX);
+    if (configured_size < 0) {
+        configured_size = 16384;
+    }
+    if (configured_size <= 0 ||
+        (unsigned long)configured_size > MAX_PASSWD_BUFFER) {
+        return -1;
+    }
+    password_buffer_size = (size_t)configured_size;
+    password_buffer = calloc(1U, password_buffer_size);
+    if (password_buffer == NULL) {
+        return -1;
+    }
+
+    if (getpwnam_r(username, &password_entry, password_buffer,
+                   password_buffer_size, &password_result) != 0 ||
+        password_result == NULL || password_entry.pw_dir == NULL) {
+        goto cleanup;
+    }
+
+    path_length = snprintf(path, sizeof(path), "%s/%s",
+                           password_entry.pw_dir, KEY_FILE);
+    if (path_length < 0 || (size_t)path_length >= sizeof(path)) {
+        goto cleanup;
+    }
+    user_id = password_entry.pw_uid;
+    group_id = password_entry.pw_gid;
+
+    secure_zero(password_buffer, password_buffer_size);
+    free(password_buffer);
+    password_buffer = NULL;
+
+    if (pipe2(pipe_fds, O_CLOEXEC) != 0) {
+        goto cleanup;
+    }
+
+    child = fork();
+    if (child < 0) {
+        goto cleanup;
+    }
+
+    if (child == 0) {
+        close(pipe_fds[0]);
+        if (initgroups(username, group_id) != 0 || setgid(group_id) != 0 ||
+            setuid(user_id) != 0) {
+            _exit(EXIT_FAILURE);
+        }
+        int child_result = child_send_key_file(pipe_fds[1], path, user_id);
+        close(pipe_fds[1]);
+        _exit(child_result == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
+    }
+
+    close(pipe_fds[1]);
+    pipe_fds[1] = -1;
+
+    while (total < sizeof(serialized)) {
+        ssize_t count = read(pipe_fds[0], serialized + total,
+                             sizeof(serialized) - total);
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            read_failed = 1;
+            break;
+        }
+        if (count == 0) {
+            break;
+        }
+        total += (size_t)count;
+    }
+
+    close(pipe_fds[0]);
+    pipe_fds[0] = -1;
+    if (wait_for_child(child, &child_status) != 0) {
+        child = -1;
+        goto cleanup;
+    }
+    child = -1;
+
+    if (read_failed || total == 0U || total > PK_MAX_FILE_SIZE ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != EXIT_SUCCESS) {
+        goto cleanup;
+    }
+
+    if (pk_parse_key_data(serialized, total, key_data) != 0) {
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    if (pipe_fds[0] >= 0) {
+        close(pipe_fds[0]);
+    }
+    if (pipe_fds[1] >= 0) {
+        close(pipe_fds[1]);
+    }
+    if (child > 0) {
+        (void)wait_for_child(child, &child_status);
+    }
+    if (password_buffer != NULL) {
+        secure_zero(password_buffer, password_buffer_size);
+        free(password_buffer);
+    }
+    secure_zero(serialized, sizeof(serialized));
+    if (result != 0) {
+        pk_key_data_clear(key_data);
+    }
+    return result;
+}
+
+static int random_below(size_t upper_bound, size_t *value_out)
+{
+    unsigned int range;
+    unsigned int limit;
+    unsigned char random_byte;
+
+    if (upper_bound == 0U || upper_bound > 256U || value_out == NULL) {
+        return -1;
+    }
+    range = (unsigned int)upper_bound;
+    limit = 256U - (256U % range);
+
+    for (size_t attempt = 0U; attempt < MAX_RANDOM_ATTEMPTS; attempt++) {
+        if (RAND_bytes(&random_byte, 1) != 1) {
+            return -1;
+        }
+        if ((unsigned int)random_byte < limit) {
+            *value_out = (size_t)((unsigned int)random_byte % range);
+            return 0;
         }
     }
-    
-    if (clean_idx != CHALLENGE_COUNT) {
-        goto cleanup;
+    return -1;
+}
+
+static int select_unique_indices(size_t pass_len,
+                                 size_t indices[CHALLENGE_COUNT])
+{
+    if (pass_len < CHALLENGE_COUNT || pass_len > PK_MAX_PASS_LEN) {
+        return -1;
     }
 
-    /* REGLA 16: Comparación de Tiempo Constante */
-    int match_count = 0;
-    unsigned char computed_hash[32];
-    char computed_hex[65];
-
-    for (int i = 0; i < CHALLENGE_COUNT; i++) {
-        calc_hash(computed_hash, salt, indices[i], clean_resp[i]);
-        for(int b=0; b<32; b++) sprintf(computed_hex + (b*2), "%02x", computed_hash[b]);
-        
-        if (stored_hashes[indices[i]]) {
-            if (CRYPTO_memcmp(computed_hex, stored_hashes[indices[i]], 64) == 0) {
-                match_count++;
+    for (size_t i = 0U; i < CHALLENGE_COUNT; i++) {
+        int selected = 0;
+        for (size_t attempt = 0U; attempt < MAX_RANDOM_ATTEMPTS; attempt++) {
+            size_t candidate;
+            int unique = 1;
+            if (random_below(pass_len, &candidate) != 0) {
+                return -1;
+            }
+            for (size_t previous = 0U; previous < i; previous++) {
+                if (indices[previous] == candidate) {
+                    unique = 0;
+                }
+            }
+            if (unique) {
+                indices[i] = candidate;
+                selected = 1;
+                break;
             }
         }
+        if (!selected) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
+                                   const char **argv)
+{
+    const char *user = NULL;
+    struct pk_key_data key_data;
+    size_t indices[CHALLENGE_COUNT] = {0U};
+    char prompt[128] = {0};
+    char *response = NULL;
+    char clean_response[CHALLENGE_COUNT + 1U] = {0};
+    unsigned char computed_hash[PK_HASH_LEN] = {0U};
+    size_t clean_length = 0U;
+    size_t response_length = 0U;
+    unsigned int mismatch = 0U;
+    int retval = PAM_AUTH_ERR;
+
+    (void)flags;
+    (void)argc;
+    (void)argv;
+    pk_key_data_clear(&key_data);
+
+    if (pam_get_user(pamh, &user, NULL) != PAM_SUCCESS || user == NULL) {
+        return PAM_AUTH_ERR;
+    }
+    if (get_user_key_data(user, &key_data) != 0) {
+        goto cleanup;
+    }
+    if (select_unique_indices(key_data.pass_len, indices) != 0) {
+        goto cleanup;
     }
 
-    if (match_count == CHALLENGE_COUNT) {
+    int prompt_length = snprintf(prompt, sizeof(prompt),
+                                 "Posiciones [%zu] [%zu] [%zu]: ",
+                                 indices[0] + 1U, indices[1] + 1U,
+                                 indices[2] + 1U);
+    if (prompt_length < 0 || (size_t)prompt_length >= sizeof(prompt)) {
+        goto cleanup;
+    }
+
+    if (pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &response, "%s", prompt) !=
+            PAM_SUCCESS ||
+        response == NULL) {
+        goto cleanup;
+    }
+
+    response_length = strnlen(response, PAM_MAX_RESP_SIZE);
+    if (response_length == PAM_MAX_RESP_SIZE) {
+        goto cleanup;
+    }
+    for (size_t i = 0U; i < response_length; i++) {
+        if (!isspace((unsigned char)response[i])) {
+            if (clean_length >= CHALLENGE_COUNT) {
+                goto cleanup;
+            }
+            clean_response[clean_length++] = response[i];
+        }
+    }
+    if (clean_length != CHALLENGE_COUNT) {
+        goto cleanup;
+    }
+
+    for (size_t i = 0U; i < CHALLENGE_COUNT; i++) {
+        if (calc_hash(computed_hash, key_data.salt, (int)indices[i],
+                      clean_response[i]) != 0) {
+            goto cleanup;
+        }
+        mismatch |= (unsigned int)CRYPTO_memcmp(
+            computed_hash, key_data.hashes[indices[i]], PK_HASH_LEN);
+        secure_zero(computed_hash, sizeof(computed_hash));
+    }
+
+    if (mismatch == 0U) {
         retval = PAM_SUCCESS;
     }
 
 cleanup:
-    if (resp) { secure_zero(resp, strlen(resp)); free(resp); }
-    if (stored_hashes) {
-        for(size_t i=0; i<pass_len; i++) free(stored_hashes[i]);
-        free(stored_hashes);
+    if (response != NULL) {
+        size_t wipe_length = strnlen(response, PAM_MAX_RESP_SIZE);
+        secure_zero(response, wipe_length);
+        free(response);
     }
-    
-    /* Anti Timing Attack Delay */
-    if (retval != PAM_SUCCESS) pam_fail_delay(pamh, 2000000);
-    
+    secure_zero(clean_response, sizeof(clean_response));
+    secure_zero(computed_hash, sizeof(computed_hash));
+    secure_zero(prompt, sizeof(prompt));
+    pk_key_data_clear(&key_data);
+
+    if (retval != PAM_SUCCESS) {
+        (void)pam_fail_delay(pamh, 2000000U);
+    }
     return retval;
 }
 
-PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-    (void)pamh; (void)flags; (void)argc; (void)argv;
+PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc,
+                              const char **argv)
+{
+    (void)pamh;
+    (void)flags;
+    (void)argc;
+    (void)argv;
     return PAM_SUCCESS;
 }

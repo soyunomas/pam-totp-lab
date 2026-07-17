@@ -24,6 +24,7 @@
 #include <limits.h>     
 #include <sys/prctl.h>  
 #include <stdint.h>
+#include <pthread.h>
 
 /* Cabeceras de PAM */
 #include <security/pam_modules.h>
@@ -31,6 +32,8 @@
 
 /* Cabecera para TOTP (liboath) */
 #include <liboath/oath.h>
+
+#include "../pam_common/totp_replay.h"
 
 /* CONSTANTES DE SEGURIDAD */
 #define SECRET_FILE ".google_authenticator"
@@ -42,6 +45,25 @@
 #define TOTP_PREFIX_LEN 3
 #define TOTP_SUFFIX_LEN 3
 #define TOTP_FULL_LEN   (TOTP_PREFIX_LEN + TOTP_SUFFIX_LEN)
+#define SECRET_NOT_FOUND 1
+#define SECRET_ERROR    (-1)
+
+static pthread_once_t oath_once = PTHREAD_ONCE_INIT;
+static int oath_init_status = OATH_CRYPTO_ERROR;
+
+static void initialize_oath(void)
+{
+    /* Keep liboath initialized for the process lifetime to avoid teardown races. */
+    oath_init_status = oath_init();
+}
+
+static int ensure_oath_initialized(void)
+{
+    return pthread_once(&oath_once, initialize_oath) == 0 &&
+                   oath_init_status == OATH_OK
+               ? 0
+               : -1;
+}
 
 /* =========================================================================
  * FUNCIONES AUXILIARES DE SEGURIDAD (HARDENED)
@@ -69,12 +91,28 @@ static void secure_free(void **ptr, size_t size) {
     }
 }
 
+static int restore_privileges(uid_t uid, gid_t gid, int group_count,
+                               const gid_t *groups)
+{
+    int failed = 0;
+    if (seteuid(uid) != 0) failed = 1;
+    if (setegid(gid) != 0) failed = 1;
+    if (group_count > 0 && groups != NULL) {
+        if (setgroups(group_count, groups) != 0) failed = 1;
+    } else if (setgroups(0, NULL) != 0) {
+        failed = 1;
+    }
+    return failed ? -1 : 0;
+}
+
 /* =========================================================================
  * LÓGICA DE RECUPERACIÓN DE SECRETOS (PRIVILEGE SEPARATION)
  * ========================================================================= */
 
-static int get_user_secret(const char *username, char *secret_buf, size_t buf_size) {
-    int retval = -1;
+static int get_user_secret(const char *username, char *secret_buf,
+                           size_t buf_size, uid_t *uid_out) {
+    int retval = SECRET_ERROR;
+    int file_missing = 0;
     long bufsize_pwd = sysconf(_SC_GETPW_R_SIZE_MAX);
     if (bufsize_pwd == -1) bufsize_pwd = 16384;
 
@@ -93,6 +131,7 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
         secure_free((void**)&buf_pwd, 0);
         return -1;
     }
+    *uid_out = pwd.pw_uid;
 
     char filepath[PATH_MAX];
     /* REGLA 1: Detección de truncamiento en rutas */
@@ -108,8 +147,17 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
     
     int original_ngroups = getgroups(0, NULL);
     gid_t *original_groups = NULL;
+
+    if (original_ngroups < 0) {
+        secure_free((void**)&buf_pwd, 0);
+        return SECRET_ERROR;
+    }
     
     if (original_ngroups > 0) {
+        if ((size_t)original_ngroups > SIZE_MAX / sizeof(gid_t)) {
+            secure_free((void**)&buf_pwd, 0);
+            return SECRET_ERROR;
+        }
         original_groups = malloc((size_t)original_ngroups * sizeof(gid_t));
         if (!original_groups) {
             secure_free((void**)&buf_pwd, 0);
@@ -127,7 +175,10 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
     if (initgroups(username, pwd.pw_gid) != 0 ||
         setegid(pwd.pw_gid) != 0 ||
         seteuid(pwd.pw_uid) != 0) {
-        
+        if (restore_privileges(old_uid, old_gid, original_ngroups,
+                               original_groups) != 0) {
+            abort();
+        }
         secure_free((void**)&buf_pwd, 0);
         if (original_groups) free(original_groups);
         return -1;
@@ -135,8 +186,12 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
 
     /* 3. LECTURA SEGURA (RACE CONDITION FREE) */
     /* REGLA 12: O_NOFOLLOW evita ataques de symlink */
-    int fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
     FILE *fp = NULL;
+
+    if (fd == -1 && errno == ENOENT) {
+        file_missing = 1;
+    }
 
     if (fd != -1) {
         struct stat st;
@@ -165,27 +220,11 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
     /* Si fallamos al restaurar root, debemos MATAR el proceso.
        No podemos dejar que PAM continúe con identidad incorrecta. */
     
-    if (seteuid(old_uid) != 0) {
+    if (restore_privileges(old_uid, old_gid, original_ngroups,
+                           original_groups) != 0) {
         syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore EUID. Aborting execution.");
         if (fp) fclose(fp);
         abort(); /* PRINCIPIO 2: Fail-Safe / Fail-Close */
-    }
-
-    if (setegid(old_gid) != 0) {
-         syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore EGID. Aborting execution.");
-         if (fp) fclose(fp);
-         abort();
-    }
-
-    if (original_ngroups > 0 && original_groups) {
-        if (setgroups(original_ngroups, original_groups) != 0) {
-            syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore groups. Aborting execution.");
-            if (fp) fclose(fp);
-            abort();
-        }
-    } else {
-        /* Si no había grupos extra, limpiamos los del usuario */
-        setgroups(0, NULL); 
     }
 
     /* Limpieza de recursos auxiliares */
@@ -212,6 +251,8 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
             }
         }
         fclose(fp);
+    } else if (file_missing) {
+        retval = SECRET_NOT_FOUND;
     }
 
     /* En caso de error general, asegurar buffer limpio */
@@ -227,7 +268,13 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
  * ========================================================================= */
 
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-    (void)flags; (void)argc; (void)argv;
+    (void)flags;
+    int nullok = 0;
+    for (int i = 0; i < argc; i++) {
+        if (argv[i] != NULL && strcmp(argv[i], "nullok") == 0) {
+            nullok = 1;
+        }
+    }
 
     const char *username = NULL;
     const char *input_pass = NULL; 
@@ -235,6 +282,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     
     /* Buffers estáticos (stack) inicializados a 0 */
     char secret_base32[256] = {0};
+    char token_str[TOTP_FULL_LEN + 1] = {0};
     
     /* Punteros dinámicos para gestión de memoria manual */
     char *secret_binary = NULL; 
@@ -243,6 +291,10 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     /* REGLA 3: Inicialización TEMPRANA para evitar uninitialized warnings en cleanup */
     size_t clean_len = 0;
     size_t secret_binary_len = 0;
+    size_t prompt_resp_len = 0;
+    size_t total_len = 0;
+    uid_t user_id = (uid_t)0;
+    uint64_t otp_counter = UINT64_C(0);
     
     int retval = PAM_AUTH_ERR;
 
@@ -250,10 +302,18 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || username == NULL) {
         return PAM_AUTH_ERR;
     }
+    if (ensure_oath_initialized() != 0) {
+        return PAM_AUTH_ERR;
+    }
 
     /* 2. OBTENER SECRETO (FAIL-CLOSE) */
-    if (get_user_secret(username, secret_base32, sizeof(secret_base32)) != 0) {
-        return PAM_IGNORE; 
+    int secret_status = get_user_secret(username, secret_base32,
+                                        sizeof(secret_base32), &user_id);
+    if (secret_status == SECRET_NOT_FOUND && nullok) {
+        return PAM_IGNORE;
+    }
+    if (secret_status != 0) {
+        return PAM_AUTH_ERR;
     }
 
     /* 3. OBTENER INPUT (PASSWORD + SANDWICH TOTP) */
@@ -263,13 +323,24 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (retval != PAM_SUCCESS || input_pass == NULL || input_pass[0] == '\0') {
         /* PRINCIPIO 9: Least Astonishment (Aunque el diseño sea raro, el prompt debe ser claro) */
         retval = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &prompt_resp, "Password: ");
-        if (retval != PAM_SUCCESS || prompt_resp == NULL) {
+        if (prompt_resp != NULL) {
+            prompt_resp_len = strnlen(prompt_resp, PAM_MAX_RESP_SIZE);
+        }
+        if (retval != PAM_SUCCESS) {
+            goto cleanup;
+        }
+        if (prompt_resp == NULL) {
+            retval = PAM_AUTH_ERR;
             goto cleanup;
         }
         input_pass = prompt_resp; 
     }
 
-    size_t total_len = strlen(input_pass);
+    total_len = strnlen(input_pass, PAM_MAX_RESP_SIZE);
+    if (total_len == PAM_MAX_RESP_SIZE) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
 
     /* REGLA 4: Integer Overflow/Underflow Prevention */
     /* Necesitamos al menos 3 (pre) + 1 (pass) + 3 (suf) = 7 caracteres */
@@ -279,9 +350,6 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     /* 4. DISECCIÓN SEGURA DEL TOKEN (SANDWICH STRATEGY) */
-    /* Buffer para recomponer el token de 6 dígitos */
-    char token_str[TOTP_FULL_LEN + 1] = {0};
-
     /* A. Copiar Prefijo (primeros 3) */
     /* REGLA 1: Uso de memcpy controlado por constantes */
     memcpy(token_str, input_pass, TOTP_PREFIX_LEN);
@@ -313,19 +381,34 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     time_t now = time(NULL);
+    if (now == (time_t)-1) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
     /* Validar TOTP: ventana de +/- 1 paso (30s) */
     rc = oath_totp_validate3(secret_binary, secret_binary_len, 
                              now, TOTP_WINDOW, 
                              0, /* start offset time */ 
                              1, /* window size steps */
-                             NULL, NULL, 
+                             NULL, &otp_counter,
                              token_str);
     
     /* Borrar secreto binario y token reconstruido de RAM */
     secure_free((void**)&secret_binary, secret_binary_len);
     secure_memzero(token_str, sizeof(token_str));
 
-    if (rc != OATH_OK) {
+    if (rc < 0) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
+    int replay_status = totp_replay_check_and_store(
+        "pam_sandwich", user_id, otp_counter);
+    if (replay_status != TOTP_REPLAY_ACCEPTED) {
+        syslog(replay_status == TOTP_REPLAY_DETECTED ? LOG_NOTICE : LOG_ERR,
+               "PAM-TOTP: %s TOTP counter for user %s",
+               replay_status == TOTP_REPLAY_DETECTED ? "Replayed" :
+                                                       "Could not persist",
+               username);
         retval = PAM_AUTH_ERR;
         goto cleanup;
     }
@@ -370,7 +453,7 @@ cleanup:
     
     /* Si usamos prompt_resp (memoria asignada por PAM/malloc), debemos borrarla */
     if (prompt_resp) {
-        secure_free((void**)&prompt_resp, strlen(prompt_resp));
+        secure_free((void**)&prompt_resp, prompt_resp_len);
     }
 
     return retval;

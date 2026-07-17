@@ -96,6 +96,7 @@ Para integrar este módulo en SSH, edita el archivo PAM correspondiente.
 
     # Requerir validación de horario escolar
     # nullok: Si el usuario no tiene ~/.school_schedule, se le permite pasar.
+    # Un archivo inseguro, corrupto o sin una franja válida sigue denegando.
     # Si quitamos 'nullok', el acceso es denegado por defecto.
     auth required pam_school_schedule.so nullok
     ```

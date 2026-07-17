@@ -16,6 +16,7 @@ Este proyecto implementa una capa de seguridad 2FA para SSH y autenticaciones lo
 *   **Memory Hardening:** Uso de `explicit_bzero` (o equivalente) para borrar secretos de la RAM inmediatamente tras su uso.
 *   **Anti-Timing Attacks:** Implementación de flujo constante para evitar enumeración de usuarios.
 *   **Audit Trail:** Logs detallados en `syslog` (sin revelar información sensible).
+*   **Anti-replay entre procesos:** El último contador aceptado se actualiza bajo bloqueo por módulo y UID.
 *   **Zero Warnings:** Compilado con `-Wall -Wextra -Werror -fstack-protector-all`.
 
 ---
@@ -113,6 +114,17 @@ Si no puedes entrar, verifica lo siguiente:
 2.  **Permisos:** Revisa `/var/log/auth.log` o `journalctl`. Si ves "Insecure file permissions", ejecuta `chmod 600 ~/.google_authenticator`.
 3.  **Formato:** Asegúrate de que no hay espacios en blanco ni saltos de línea extraños en el archivo del secreto.
 4.  **Ventana de Tiempo:** El módulo permite una ventana de ±30 segundos (1 paso) para compensar retrasos humanos.
+
+> **Anti-replay:** el módulo guarda el último contador aceptado por UID en
+> `/run/pam-totp-lab/` y lo actualiza bajo un bloqueo compartido por los procesos
+> PAM. Rechaza el mismo contador y cualquier contador anterior. El estado debe
+> ser propiedad de `root`, sin permisos para grupo u otros; cualquier fallo de
+> apertura, validación, bloqueo o escritura deniega la autenticación. El
+> consumidor PAM debe ejecutar el módulo con EUID 0.
+>
+> `/run` es volátil y el estado se reinicia al arrancar. Después del arranque se
+> conserva la ventana TOTP normal y la protección vuelve a activarse desde el
+> primer código aceptado.
 
 ---
 

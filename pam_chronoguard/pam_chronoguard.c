@@ -20,6 +20,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>     
+#include <stdint.h>
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
 
@@ -27,6 +28,8 @@
 #define CONFIG_FILE ".chronoguard"
 #define MAX_CONFIG_LINE 128
 #define MAX_TIME_BUFFER 64
+#define CONFIG_NOT_FOUND 1
+#define CONFIG_ERROR    (-1)
 
 /* REGLA 14: Limpieza segura de memoria (Anti-Forensic) */
 static void secure_memzero(void *s, size_t n) {
@@ -36,14 +39,30 @@ static void secure_memzero(void *s, size_t n) {
     __asm__ __volatile__("" : : "r"(s) : "memory");
 }
 
+static int restore_privileges(uid_t uid, gid_t gid, int group_count,
+                               const gid_t *groups)
+{
+    int failed = 0;
+    if (seteuid(uid) != 0) failed = 1;
+    if (setegid(gid) != 0) failed = 1;
+    if (group_count > 0 && groups != NULL) {
+        if (setgroups(group_count, groups) != 0) failed = 1;
+    } else if (setgroups(0, NULL) != 0) {
+        failed = 1;
+    }
+    return failed ? -1 : 0;
+}
+
 /* CONSTRUCTOR DE TIEMPO DINÁMICO */
-static void build_time_string(const char *fmt, const struct tm *t, char *out_buf, size_t max_len) {
-    if (!fmt || !out_buf || max_len == 0) return;
+static int build_time_string(const char *fmt, const struct tm *t,
+                             char *out_buf, size_t max_len) {
+    if (!fmt || !t || !out_buf || max_len == 0) return -1;
     
     memset(out_buf, 0, max_len);
     size_t current_len = 0;
     const char *p = fmt;
     char tmp[16]; 
+    size_t token_count = 0U;
 
     while (*p && current_len < (max_len - 1)) {
         memset(tmp, 0, sizeof(tmp));
@@ -66,13 +85,13 @@ static void build_time_string(const char *fmt, const struct tm *t, char *out_buf
             snprintf(tmp, sizeof(tmp), "%02d", t->tm_mon + 1);
             p += 2; added = 1;
         }
-        else if (strncmp(p, "YY", 2) == 0 || strncmp(p, "AA", 2) == 0) {
-            snprintf(tmp, sizeof(tmp), "%02d", t->tm_year % 100);
-            p += 2; added = 1;
-        }
         else if (strncmp(p, "YYYY", 4) == 0) {
             snprintf(tmp, sizeof(tmp), "%04d", t->tm_year + 1900);
             p += 4; added = 1;
+        }
+        else if (strncmp(p, "YY", 2) == 0 || strncmp(p, "AA", 2) == 0) {
+            snprintf(tmp, sizeof(tmp), "%02d", t->tm_year % 100);
+            p += 2; added = 1;
         }
         else if (strncmp(p, "WD", 2) == 0) {
             snprintf(tmp, sizeof(tmp), "%d", (t->tm_wday == 0 ? 7 : t->tm_wday));
@@ -87,11 +106,14 @@ static void build_time_string(const char *fmt, const struct tm *t, char *out_buf
             if (current_len + tmp_len < max_len) {
                 strncat(out_buf, tmp, max_len - current_len - 1);
                 current_len += tmp_len;
+                token_count++;
             } else {
-                break; 
+                return -1;
             }
         }
     }
+    if (fmt[0] != '\0' && token_count == 0U) return -1;
+    return 0;
 }
 
 /* Lectura segura de configuración con DROP PRIVILEGES */
@@ -124,21 +146,40 @@ static int get_user_config(const char *username, char *pre_fmt, char *post_fmt, 
     /* Guardamos grupos para restaurar, pero no inicializamos grupos nuevos innecesariamente */
     int groups_n = getgroups(0, NULL);
     gid_t *groups = NULL;
+
+    if (groups_n < 0) { free(buf); return -1; }
     
     if (groups_n > 0) {
+        if ((size_t)groups_n > SIZE_MAX / sizeof(gid_t)) {
+            free(buf);
+            return -1;
+        }
         groups = malloc(groups_n * sizeof(gid_t));
         if (!groups) { free(buf); return -1; }
         if (getgroups(groups_n, groups) == -1) { free(buf); free(groups); return -1; }
     }
 
-    /* Drop temporal a usuario para leer su archivo */
-    /* FIX: No usamos initgroups() aqui, solo necesitamos el UID/GID efectivo para leer el archivo */
+    /* Eliminar grupos suplementarios antes de cambiar la identidad efectiva. */
+    if (setgroups(0, NULL) != 0) {
+        free(buf); if (groups) free(groups); return -1;
+    }
+
+    /* Drop temporal a usuario para leer su archivo. */
     if (setegid(pwd.pw_gid) != 0 || seteuid(pwd.pw_uid) != 0) {
+        if (restore_privileges(old_uid, old_gid, groups_n, groups) != 0) {
+            abort();
+        }
         free(buf); if(groups) free(groups); return -1;
     }
 
-    FILE *fp = fopen(path, "r");
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    FILE *fp = fd >= 0 ? fdopen(fd, "r") : NULL;
+    int file_missing = 0;
     int success = 0;
+
+    if (fd < 0 && errno == ENOENT) {
+        file_missing = 1;
+    }
     
     if (fp) {
         struct stat st;
@@ -166,66 +207,87 @@ static int get_user_config(const char *username, char *pre_fmt, char *post_fmt, 
             }
         }
         fclose(fp);
+    } else if (fd >= 0) {
+        close(fd);
     }
 
     /* Restaurar privilegios (Fail-Close: abortar si falla) */
-    if (seteuid(old_uid) != 0 || setegid(old_gid) != 0) { 
+    if (restore_privileges(old_uid, old_gid, groups_n, groups) != 0) {
         /* Regla 2: Fail-Safe. Si no podemos recuperar root, morimos. */
         abort(); 
     }
     
-    /* Restaurar grupos si los hubiere */
-    if (groups) { 
-        if (setgroups(groups_n, groups) != 0) abort(); 
-        free(groups); 
-    } else {
-        /* Si no habia grupos extra, limpiamos */
-        setgroups(0, NULL);
-    }
+    free(groups);
     /* --- FIN ZONA CRÍTICA --- */
 
     free(buf);
-    return success ? 0 : -1;
+    if (success) {
+        return 0;
+    }
+    return file_missing ? CONFIG_NOT_FOUND : CONFIG_ERROR;
 }
 
 /* PUNTO DE ENTRADA PRINCIPAL */
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-    (void)flags; (void)argc; (void)argv;
+    (void)flags;
+    int nullok = 0;
+    for (int i = 0; i < argc; i++) {
+        if (argv[i] != NULL && strcmp(argv[i], "nullok") == 0) {
+            nullok = 1;
+        }
+    }
     const char *username = NULL;
     const char *password = NULL;
+    char *prompt_resp = NULL;
     char *clean_pass = NULL;
+    char pre_fmt[MAX_TIME_BUFFER] = {0};
+    char post_fmt[MAX_TIME_BUFFER] = {0};
+    char expected_pre[MAX_TIME_BUFFER] = {0};
+    char expected_suf[MAX_TIME_BUFFER] = {0};
+    size_t clean_len = 0;
     int retval = PAM_AUTH_ERR;
 
     openlog("pam_chronoguard", LOG_PID | LOG_CONS, LOG_AUTH);
 
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || !username) return PAM_AUTH_ERR;
 
-    char pre_fmt[MAX_TIME_BUFFER] = {0};
-    char post_fmt[MAX_TIME_BUFFER] = {0};
-
-    /* Si no hay config, ignoramos (auth optional support) */
-    if (get_user_config(username, pre_fmt, post_fmt, sizeof(pre_fmt)) != 0) return PAM_IGNORE; 
-    if (strlen(pre_fmt) == 0 && strlen(post_fmt) == 0) return PAM_IGNORE;
+    /* Sólo la ausencia física se puede ignorar con nullok. */
+    int config_status = get_user_config(username, pre_fmt, post_fmt,
+                                        sizeof(pre_fmt));
+    if (config_status == CONFIG_NOT_FOUND && nullok) return PAM_IGNORE;
+    if (config_status != 0) return PAM_AUTH_ERR;
+    if (strlen(pre_fmt) == 0 && strlen(post_fmt) == 0) return PAM_AUTH_ERR;
 
     if (pam_get_item(pamh, PAM_AUTHTOK, (const void **)&password) != PAM_SUCCESS) return PAM_AUTH_ERR;
     
     if (!password) { 
-        char *resp = NULL;
-        retval = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &resp, "Password: ");
-        if (retval != PAM_SUCCESS || !resp) return PAM_AUTH_ERR;
-        pam_set_item(pamh, PAM_AUTHTOK, resp);
-        password = resp; 
+        retval = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &prompt_resp,
+                            "Password: ");
+        if (retval != PAM_SUCCESS) goto cleanup;
+        if (!prompt_resp) {
+            retval = PAM_AUTH_ERR;
+            goto cleanup;
+        }
+        if (pam_set_item(pamh, PAM_AUTHTOK, prompt_resp) != PAM_SUCCESS) {
+            retval = PAM_AUTH_ERR;
+            goto cleanup;
+        }
+        password = prompt_resp;
     }
 
     time_t now = time(NULL);
     struct tm t_buf; 
     struct tm *t = localtime_r(&now, &t_buf);
+    if (now == (time_t)-1 || t == NULL) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
     
-    char expected_pre[MAX_TIME_BUFFER] = {0};
-    char expected_suf[MAX_TIME_BUFFER] = {0};
-
-    build_time_string(pre_fmt, t, expected_pre, sizeof(expected_pre));
-    build_time_string(post_fmt, t, expected_suf, sizeof(expected_suf));
+    if (build_time_string(pre_fmt, t, expected_pre, sizeof(expected_pre)) != 0 ||
+        build_time_string(post_fmt, t, expected_suf, sizeof(expected_suf)) != 0) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
 
     /* 
      * [SECURITY FIX] v2.4
@@ -235,7 +297,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     
     size_t pre_len = strlen(expected_pre);
     size_t suf_len = strlen(expected_suf);
-    size_t pass_len = strlen(password);
+    size_t pass_len = strnlen(password, PAM_MAX_RESP_SIZE);
+    if (pass_len == PAM_MAX_RESP_SIZE) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
     size_t min_len = pre_len + suf_len + 1; 
 
     /* Validación de longitud para evitar underflows en la resta posterior */
@@ -262,7 +328,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     /* Extracción de la contraseña real "sandwicheada" */
-    size_t clean_len = pass_len - pre_len - suf_len;
+    clean_len = pass_len - pre_len - suf_len;
     clean_pass = malloc(clean_len + 1);
     if (!clean_pass) {
         retval = PAM_BUF_ERR;
@@ -285,6 +351,11 @@ cleanup:
     if (clean_pass) {
         secure_memzero(clean_pass, clean_len);
         free(clean_pass);
+    }
+    if (prompt_resp) {
+        size_t response_len = strnlen(prompt_resp, PAM_MAX_RESP_SIZE);
+        secure_memzero(prompt_resp, response_len);
+        free(prompt_resp);
     }
     secure_memzero(expected_pre, sizeof(expected_pre));
     secure_memzero(expected_suf, sizeof(expected_suf));

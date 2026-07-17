@@ -40,9 +40,12 @@
 #include <limits.h>     
 #include <sys/prctl.h>  
 #include <stdint.h>
+#include <pthread.h>
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
 #include <liboath/oath.h>
+
+#include "../pam_common/totp_replay.h"
 
 #define SECRET_FILE ".google_authenticator"
 #define MIN_SECRET_LEN 16
@@ -56,6 +59,23 @@
 #define SECRET_OK           0
 #define SECRET_NOT_FOUND    1
 #define SECRET_ERROR        -1
+
+static pthread_once_t oath_once = PTHREAD_ONCE_INIT;
+static int oath_init_status = OATH_CRYPTO_ERROR;
+
+static void initialize_oath(void)
+{
+    /* Keep liboath initialized for the process lifetime to avoid teardown races. */
+    oath_init_status = oath_init();
+}
+
+static int ensure_oath_initialized(void)
+{
+    return pthread_once(&oath_once, initialize_oath) == 0 &&
+                   oath_init_status == OATH_OK
+               ? 0
+               : -1;
+}
 
 static void secure_memzero(void *s, size_t n) {
     if (!s || n == 0) return;
@@ -76,7 +96,22 @@ static void secure_free(void **ptr, size_t size) {
     }
 }
 
-static int get_user_secret(const char *username, char *secret_buf, size_t buf_size) {
+static int restore_privileges(uid_t uid, gid_t gid, int group_count,
+                               const gid_t *groups)
+{
+    int failed = 0;
+    if (seteuid(uid) != 0) failed = 1;
+    if (setegid(gid) != 0) failed = 1;
+    if (group_count > 0 && groups != NULL) {
+        if (setgroups(group_count, groups) != 0) failed = 1;
+    } else if (setgroups(0, NULL) != 0) {
+        failed = 1;
+    }
+    return failed ? -1 : 0;
+}
+
+static int get_user_secret(const char *username, char *secret_buf,
+                           size_t buf_size, uid_t *uid_out) {
     int retval = SECRET_ERROR;
     
     long bufsize_pwd = sysconf(_SC_GETPW_R_SIZE_MAX);
@@ -93,6 +128,7 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
         secure_free((void**)&buf_pwd, (size_t)bufsize_pwd);
         return SECRET_ERROR;
     }
+    *uid_out = pwd.pw_uid;
 
     char filepath[PATH_MAX];
     if (snprintf(filepath, sizeof(filepath), "%s/%s", pwd.pw_dir, SECRET_FILE) >= (int)sizeof(filepath)) {
@@ -106,8 +142,17 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
     
     int original_ngroups = getgroups(0, NULL);
     gid_t *original_groups = NULL;
+
+    if (original_ngroups < 0) {
+        secure_free((void**)&buf_pwd, (size_t)bufsize_pwd);
+        return SECRET_ERROR;
+    }
     
     if (original_ngroups > 0) {
+        if ((size_t)original_ngroups > SIZE_MAX / sizeof(gid_t)) {
+            secure_free((void**)&buf_pwd, (size_t)bufsize_pwd);
+            return SECRET_ERROR;
+        }
         original_groups = malloc((size_t)original_ngroups * sizeof(gid_t));
         if (!original_groups) {
             secure_free((void**)&buf_pwd, (size_t)bufsize_pwd);
@@ -124,13 +169,16 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
     if (initgroups(username, pwd.pw_gid) != 0 ||
         setegid(pwd.pw_gid) != 0 ||
         seteuid(pwd.pw_uid) != 0) {
-        
+        if (restore_privileges(old_uid, old_gid, original_ngroups,
+                               original_groups) != 0) {
+            abort();
+        }
         secure_free((void**)&buf_pwd, (size_t)bufsize_pwd);
         if (original_groups) free(original_groups);
         return SECRET_ERROR;
     }
 
-    int fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int fd = open(filepath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
     FILE *fp = NULL;
 
     if (fd != -1) {
@@ -156,18 +204,8 @@ static int get_user_secret(const char *username, char *secret_buf, size_t buf_si
     }
 
     /* RESTAURAR PRIVILEGIOS */
-    int restore_error = 0;
-    if (seteuid(old_uid) != 0) restore_error = 1;
-    if (!restore_error) {
-        if (setegid(old_gid) != 0) restore_error = 1;
-        if (original_ngroups > 0 && original_groups) {
-            if (setgroups(original_ngroups, original_groups) != 0) restore_error = 1;
-        } else {
-            if (setgroups(0, NULL) != 0) restore_error = 1;
-        }
-    }
-
-    if (restore_error) {
+    if (restore_privileges(old_uid, old_gid, original_ngroups,
+                           original_groups) != 0) {
         syslog(LOG_CRIT, "PAM-TOTP: CRITICAL - Cannot restore privileges. Aborting.");
         if (fp) fclose(fp);
         secure_free((void**)&buf_pwd, (size_t)bufsize_pwd);
@@ -210,8 +248,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     char secret_base32[256] = {0};
     char *secret_binary = NULL;
     size_t secret_binary_len = 0;
+    size_t otp_input_len = 0;
     int retval = PAM_AUTH_ERR;
     int nullok = 0;
+    uid_t user_id = (uid_t)0;
+    uint64_t otp_counter = UINT64_C(0);
 
     for (int i = 0; i < argc; i++) {
         if (argv[i] && strcmp(argv[i], "nullok") == 0) {
@@ -222,8 +263,12 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || username == NULL) {
         return PAM_AUTH_ERR;
     }
+    if (ensure_oath_initialized() != 0) {
+        return PAM_AUTH_ERR;
+    }
 
-    int secret_status = get_user_secret(username, secret_base32, sizeof(secret_base32));
+    int secret_status = get_user_secret(username, secret_base32,
+                                        sizeof(secret_base32), &user_id);
 
     int fake_mode = 0;
     if (secret_status != SECRET_OK) {
@@ -235,18 +280,25 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     retval = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &otp_input, "Verification Code: ");
-    
-    if (retval != PAM_SUCCESS || otp_input == NULL) {
+
+    if (otp_input != NULL) {
+        otp_input_len = strnlen(otp_input, PAM_MAX_RESP_SIZE);
+    }
+    if (retval != PAM_SUCCESS) {
         goto cleanup;
     }
-
-    size_t input_len = strlen(otp_input);
-    if (input_len < 6 || input_len > 8) {
+    if (otp_input == NULL) {
         retval = PAM_AUTH_ERR;
         goto cleanup;
     }
 
-    for (size_t i = 0; i < input_len; i++) {
+    if (otp_input_len == PAM_MAX_RESP_SIZE || otp_input_len < 6U ||
+        otp_input_len > 8U) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
+
+    for (size_t i = 0; i < otp_input_len; i++) {
         if (otp_input[i] < '0' || otp_input[i] > '9') {
             retval = PAM_AUTH_ERR;
             goto cleanup;
@@ -263,6 +315,10 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     time_t now = time(NULL);
+    if (now == (time_t)-1) {
+        retval = PAM_AUTH_ERR;
+        goto cleanup;
+    }
     
     /* FIX: Llamada correcta con paso de 30s y ventana de tolerancia */
     rc = oath_totp_validate3(secret_binary, secret_binary_len, 
@@ -270,11 +326,22 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
                              TOTP_STEP_SIZE,   /* PASO DE TIEMPO (30s) */
                              0,                /* Inicio (0) */
                              TOTP_WINDOW,      /* VENTANA (1 paso extra) */
-                             NULL, NULL, 
+                             NULL, &otp_counter,
                              otp_input);
 
-    if (rc == OATH_OK && !fake_mode) {
-        retval = PAM_SUCCESS;
+    if (rc >= 0 && !fake_mode) {
+        int replay_status = totp_replay_check_and_store(
+            "pam_strict_totp", user_id, otp_counter);
+        if (replay_status == TOTP_REPLAY_ACCEPTED) {
+            retval = PAM_SUCCESS;
+        } else {
+            syslog(replay_status == TOTP_REPLAY_DETECTED ? LOG_NOTICE : LOG_ERR,
+                   "PAM-TOTP: %s TOTP counter for user %s",
+                   replay_status == TOTP_REPLAY_DETECTED ? "Replayed" :
+                                                           "Could not persist",
+                   username);
+            retval = PAM_AUTH_ERR;
+        }
     } else {
         retval = PAM_AUTH_ERR;
         if (!fake_mode) syslog(LOG_NOTICE, "PAM-TOTP: Invalid OTP attempt for user %s", username);
@@ -283,7 +350,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 cleanup:
     secure_memzero(secret_base32, sizeof(secret_base32));
     if (secret_binary) secure_free((void**)&secret_binary, secret_binary_len);
-    if (otp_input) secure_free((void**)&otp_input, strlen(otp_input));
+    if (otp_input) secure_free((void**)&otp_input, otp_input_len);
 
     if (retval != PAM_SUCCESS) {
         pam_fail_delay(pamh, FAIL_DELAY);

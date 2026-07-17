@@ -9,6 +9,19 @@ El módulo espera que la entrada de contraseña tenga el siguiente formato:
 
 Utiliza `liboath` para la validación TOTP y gestión estricta de permisos de archivo para el almacenamiento de secretos.
 
+La validación admite un paso de desfase en ambas direcciones. Cada contador
+aceptado se registra por módulo y UID en `/run/pam-totp-lab/`, con bloqueo entre
+procesos, para impedir que el mismo código o uno anterior vuelva a aceptarse.
+El directorio y sus ficheros deben pertenecer a `root` y no ser accesibles por
+grupo ni por otros usuarios. Si el módulo no puede bloquear, validar o actualizar
+ese estado, la autenticación se deniega. Por ello, el consumidor PAM debe
+ejecutar el módulo con EUID 0.
+
+El estado reside en `/run` y se reinicia al arrancar el sistema. Esto no amplía
+la validez temporal del TOTP: tras el arranque vuelve a aplicarse la ventana
+normal de liboath y, desde la primera aceptación, el contador vuelve a avanzar
+de forma monotónica.
+
 ## Requisitos
 
 Probado en **Debian** y **Ubuntu**. Se requieren las librerías de desarrollo de PAM y OATH.
@@ -66,6 +79,14 @@ Para instrucciones detalladas sobre cómo editar `/etc/pam.d/sshd` y `/etc/ssh/s
 
 ```bash
 make hints
+```
+
+Si el usuario no tiene `.google_authenticator`, el módulo deniega el acceso
+por defecto. Añade `nullok` explícitamente en la línea PAM sólo si quieres que
+la ausencia del archivo deje continuar la pila:
+
+```text
+auth required pam_sandwich.so nullok
 ```
 
 ## Licencia

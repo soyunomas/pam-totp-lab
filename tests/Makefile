@@ -1,0 +1,210 @@
+CC ?= cc
+CXX ?= c++
+CLANG ?= clang
+BUILD_DIR ?= build
+CXX_STDLIB_DIR := $(dir $(shell $(CXX) -print-file-name=libstdc++.so))
+
+TEST_CPPFLAGS := -D_GNU_SOURCE
+CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic \
+	-fstack-protector-strong $(CFLAGS_EXTRA)
+MODULE_CFLAGS := $(CFLAGS) -fPIC
+HARDEN_LDFLAGS := -Wl,-z,relro,-z,now
+LDFLAGS_EXTRA ?=
+
+HARNESS := $(BUILD_DIR)/pam_harness
+TEST_MODULE := $(BUILD_DIR)/pam_test_result.so
+PARSER_TEST := $(BUILD_DIR)/test_partial_key_parser
+PARSER_FUZZ := $(BUILD_DIR)/fuzz_partial_key_parser
+CHRONO_TEST := $(BUILD_DIR)/test_chronoguard_helpers
+SCHOOL_TEST := $(BUILD_DIR)/test_school_schedule_helpers
+LIBOATH_TEST := $(BUILD_DIR)/test_liboath_window
+REPLAY_TEST := $(BUILD_DIR)/test_totp_replay
+PK_MANAGER_TEST := $(BUILD_DIR)/pk_manager
+TWO_MAN_TEST := $(BUILD_DIR)/test_2man_helpers
+HELPER_TESTS := $(CHRONO_TEST) $(SCHOOL_TEST) $(LIBOATH_TEST) $(REPLAY_TEST) \
+	$(TWO_MAN_TEST)
+PRODUCTION_DIR := $(BUILD_DIR)/production
+PRODUCTION_ARTIFACTS := \
+	$(PRODUCTION_DIR)/pam_sandwich.so \
+	$(PRODUCTION_DIR)/pam_strict_totp.so \
+	$(PRODUCTION_DIR)/pam_chronoguard.so \
+	$(PRODUCTION_DIR)/pam_partial_key.so \
+	$(PRODUCTION_DIR)/pk_manager \
+	$(PRODUCTION_DIR)/pam_school_schedule.so \
+	$(PRODUCTION_DIR)/pam_2man_totp.so
+
+.PHONY: all production test fuzz analyze analyze-production valgrind hardening \
+	verify clean
+
+all: $(HARNESS) $(TEST_MODULE)
+
+$(BUILD_DIR):
+	mkdir -p $@
+
+$(HARNESS): pam_harness.c | $(BUILD_DIR)
+	$(CC) $(TEST_CPPFLAGS) $(CFLAGS) $< -o $@ -lpam $(LDFLAGS_EXTRA)
+
+$(TEST_MODULE): pam_test_result.c | $(BUILD_DIR)
+	$(CC) $(TEST_CPPFLAGS) $(MODULE_CFLAGS) -shared $< -o $@ -lpam \
+		$(LDFLAGS_EXTRA)
+
+$(PARSER_TEST): test_partial_key_parser.c ../pam_partial_key/keyfile.c \
+		../pam_partial_key/keyfile.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) test_partial_key_parser.c ../pam_partial_key/keyfile.c \
+		-o $@ $(LDFLAGS_EXTRA)
+
+$(CHRONO_TEST): test_chronoguard_helpers.c \
+		../pam_chronoguard/pam_chronoguard.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< -o $@ -lpam $(LDFLAGS_EXTRA)
+
+$(SCHOOL_TEST): test_school_schedule_helpers.c \
+		../pam_school_schedule/pam_school_schedule.c | $(BUILD_DIR)
+	$(CC) $(TEST_CPPFLAGS) $(CFLAGS) $< -o $@ -lpam $(LDFLAGS_EXTRA)
+
+$(LIBOATH_TEST): test_liboath_window.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< -o $@ -loath $(LDFLAGS_EXTRA)
+
+$(REPLAY_TEST): test_totp_replay.c ../pam_common/totp_replay.c \
+		../pam_common/totp_replay.h | $(BUILD_DIR)
+	$(CC) -DTOTP_REPLAY_TESTING $(CFLAGS) test_totp_replay.c \
+		../pam_common/totp_replay.c -o $@ $(LDFLAGS_EXTRA)
+
+$(PK_MANAGER_TEST): ../pam_partial_key/pk_manager.c \
+		../pam_partial_key/keyfile.h | $(BUILD_DIR)
+	$(CC) -DPK_MANAGER_TESTING $(CFLAGS) ../pam_partial_key/pk_manager.c \
+		-o $@ -lcrypto \
+		$(LDFLAGS_EXTRA)
+
+$(TWO_MAN_TEST): test_2man_helpers.c ../pam_2man_totp/pam_2man_totp.c \
+		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) test_2man_helpers.c ../pam_common/totp_replay.c \
+		-o $@ -lpam -loath -pthread $(LDFLAGS_EXTRA)
+
+$(PRODUCTION_DIR):
+	mkdir -p $@
+
+$(PRODUCTION_DIR)/pam_sandwich.so: ../pam-sandwich/pam_sandwich.c \
+		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
+	$(CC) $(MODULE_CFLAGS) -shared ../pam-sandwich/pam_sandwich.c \
+		../pam_common/totp_replay.c -o $@ -lpam -loath -pthread \
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(PRODUCTION_DIR)/pam_strict_totp.so: ../pam_strict_totp/pam_strict_totp.c \
+		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
+	$(CC) $(MODULE_CFLAGS) -shared ../pam_strict_totp/pam_strict_totp.c \
+		../pam_common/totp_replay.c -o $@ -lpam -loath -pthread \
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(PRODUCTION_DIR)/pam_chronoguard.so: ../pam_chronoguard/pam_chronoguard.c | $(PRODUCTION_DIR)
+	$(CC) $(MODULE_CFLAGS) -shared $< -o $@ -lpam \
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(PRODUCTION_DIR)/pam_partial_key.so: ../pam_partial_key/pam_partial_key.c \
+		../pam_partial_key/keyfile.c ../pam_partial_key/keyfile.h | $(PRODUCTION_DIR)
+	$(CC) $(MODULE_CFLAGS) -shared ../pam_partial_key/pam_partial_key.c \
+		../pam_partial_key/keyfile.c -o $@ -lpam -lcrypto \
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(PRODUCTION_DIR)/pk_manager: ../pam_partial_key/pk_manager.c | $(PRODUCTION_DIR)
+	$(CC) $(CFLAGS) $< -o $@ -pie -lcrypto $(HARDEN_LDFLAGS) \
+		$(LDFLAGS_EXTRA)
+
+$(PRODUCTION_DIR)/pam_school_schedule.so: ../pam_school_schedule/pam_school_schedule.c | $(PRODUCTION_DIR)
+	$(CC) -D_GNU_SOURCE $(MODULE_CFLAGS) -shared $< -o $@ -lpam \
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(PRODUCTION_DIR)/pam_2man_totp.so: ../pam_2man_totp/pam_2man_totp.c \
+		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
+	$(CC) $(MODULE_CFLAGS) -shared ../pam_2man_totp/pam_2man_totp.c \
+		../pam_common/totp_replay.c -o $@ -lpam -loath -pthread \
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
+
+production: $(PRODUCTION_ARTIFACTS)
+
+hardening: production
+	sh ./test_elf_hardening.sh $(PRODUCTION_ARTIFACTS)
+
+test: all $(PARSER_TEST) $(HELPER_TESTS) $(PK_MANAGER_TEST)
+	sh ./test_pam_stack.sh $(BUILD_DIR)
+	$(PARSER_TEST)
+	$(CHRONO_TEST)
+	$(SCHOOL_TEST)
+	$(LIBOATH_TEST)
+	$(REPLAY_TEST)
+	$(TWO_MAN_TEST)
+	sh ./test_pk_manager.sh $(PK_MANAGER_TEST)
+
+fuzz: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/fuzz-artifacts
+	$(CLANG) -std=c11 -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=fuzzer,address,undefined fuzz_partial_key_parser.c \
+		../pam_partial_key/keyfile.c -L$(CXX_STDLIB_DIR) -o $(PARSER_FUZZ)
+	$(PARSER_FUZZ) -runs=10000 -max_len=4225 \
+		-artifact_prefix=$(BUILD_DIR)/fuzz-artifacts/
+
+analyze:
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text $(TEST_CPPFLAGS) \
+		-std=c11 -Wall -Wextra -Wpedantic pam_harness.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text $(TEST_CPPFLAGS) \
+		-std=c11 -Wall -Wextra -Wpedantic pam_test_result.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
+		-std=c11 -Wall -Wextra -Wpedantic test_partial_key_parser.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
+		-std=c11 -Wall -Wextra -Wpedantic ../pam_partial_key/keyfile.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
+		-std=c11 -Wall -Wextra -Wpedantic test_chronoguard_helpers.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text $(TEST_CPPFLAGS) \
+		-std=c11 -Wall -Wextra -Wpedantic test_school_schedule_helpers.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
+		-std=c11 -Wall -Wextra -Wpedantic test_liboath_window.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
+		-DTOTP_REPLAY_TESTING -std=c11 -Wall -Wextra -Wpedantic \
+		test_totp_replay.c ../pam_common/totp_replay.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text \
+		-std=c11 -Wall -Wextra -Wpedantic test_2man_helpers.c \
+		../pam_common/totp_replay.c
+
+analyze-production:
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam-sandwich/pam_sandwich.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_strict_totp/pam_strict_totp.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_chronoguard/pam_chronoguard.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_partial_key/pam_partial_key.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_partial_key/keyfile.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_partial_key/pk_manager.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_school_schedule/pam_school_schedule.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_2man_totp/pam_2man_totp.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_common/totp_replay.c
+
+valgrind: all $(PARSER_TEST) $(HELPER_TESTS) $(PK_MANAGER_TEST)
+	PAM_HARNESS_RUNNER='valgrind --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite --error-exitcode=99 --suppressions=valgrind.supp' \
+		sh ./test_pam_stack.sh $(BUILD_DIR)
+	valgrind --leak-check=full --show-leak-kinds=definite \
+		--errors-for-leak-kinds=definite --error-exitcode=99 $(PARSER_TEST)
+	valgrind --leak-check=full --show-leak-kinds=definite \
+		--errors-for-leak-kinds=definite --error-exitcode=99 $(CHRONO_TEST)
+	valgrind --leak-check=full --show-leak-kinds=definite \
+		--errors-for-leak-kinds=definite --error-exitcode=99 $(SCHOOL_TEST)
+	valgrind --leak-check=full --show-leak-kinds=definite \
+		--errors-for-leak-kinds=definite --error-exitcode=99 $(LIBOATH_TEST)
+	valgrind --leak-check=full --show-leak-kinds=definite \
+		--errors-for-leak-kinds=definite --error-exitcode=99 $(REPLAY_TEST)
+	valgrind --leak-check=full --show-leak-kinds=definite \
+		--errors-for-leak-kinds=definite --error-exitcode=99 $(TWO_MAN_TEST)
+	PK_MANAGER_RUNNER='valgrind --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite --error-exitcode=99' \
+		sh ./test_pk_manager.sh $(PK_MANAGER_TEST)
+
+verify:
+	$(MAKE) BUILD_DIR=build/gcc CC=gcc test hardening
+	$(MAKE) BUILD_DIR=build/clang CC=clang test hardening
+	$(MAKE) BUILD_DIR=build/fuzz fuzz
+	$(MAKE) analyze
+	$(MAKE) analyze-production
+	$(MAKE) BUILD_DIR=build/gcc valgrind
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	$(MAKE) BUILD_DIR=build/sanitize CC=clang \
+		CFLAGS_EXTRA='-O1 -fno-omit-frame-pointer -fsanitize=address,undefined' \
+		LDFLAGS_EXTRA='-fsanitize=address,undefined' test
+
+clean:
+	rm -rf -- build

@@ -10,7 +10,9 @@ Este proyecto implementa un mecanismo de **Control Dual** (similar al lanzamient
 1.  **El Iniciador:** El usuario que solicita el acceso.
 2.  **El Autorizador:** Un segundo administrador (miembro del grupo `wheel`) que aprueba la solicitud en tiempo real.
 
-Diseñado bajo estándares **MISRA-C** y filosofía **OpenBSD Secure Coding**: Fail-Close, sin fugas de memoria, sin condiciones de carrera y mitigación de ataques de tiempo.
+Diseñado con criterios de **MISRA-C** y **OpenBSD Secure Coding**: Fail-Close,
+limpieza de memoria, protección anti-replay y mitigaciones frente a ataques de
+tiempo.
 
 ---
 
@@ -21,7 +23,8 @@ Diseñado bajo estándares **MISRA-C** y filosofía **OpenBSD Secure Coding**: F
 *   **Validación de Privilegios:** El Autorizador *debe* pertenecer al grupo `wheel` (o grupo administrativo configurado).
 *   **Privilege Separation:** El proceso "suelta" los privilegios de `root` (drop privileges) antes de leer los archivos secretos de los usuarios.
 *   **Memory Hardening:** Limpieza agresiva de memoria (Zeroization) de claves y buffers OTP inmediatamente después de su uso.
-*   **Anti-Timing Attacks:** Si un usuario no existe o no tiene fichero, el sistema simula verificaciones criptográficas para no revelar información a través del tiempo de respuesta.
+*   **Anti-Timing Attacks:** Si un usuario no existe, no es autorizador o no tiene fichero, el sistema ejecuta una verificación TOTP con un secreto ficticio válido antes de denegar.
+*   **Anti-replay entre procesos:** Cada contador aceptado se registra por módulo y UID bajo bloqueo exclusivo.
 
 ---
 
@@ -107,6 +110,19 @@ Reiniciar SSH: `sudo systemctl restart ssh`
 1.  **"Authorizer ... is not a member of wheel":** El usuario que escribiste en el segundo paso no tiene permisos de administración. Añádelo: `sudo usermod -aG wheel usuario2`.
 2.  **Log "Insecure permissions":** El archivo secreto tiene permisos `777` o grupo incorrecto. Ejecuta `chmod 600 ~/.google_authenticator`.
 3.  **Time Drift:** Los códigos TOTP fallan si el reloj del servidor tiene más de 30 segundos de desfase respecto al móvil. Usa NTP.
+
+> **Anti-replay:** el último contador aceptado de cada usuario se guarda en
+> `/run/pam-totp-lab/` y se actualiza bajo un bloqueo compartido por todos los
+> procesos PAM. Se rechaza el mismo contador o cualquiera anterior. El estado
+> debe ser propiedad de `root` y privado; si no puede abrirse, validarse,
+> bloquearse o actualizarse, se deniega toda la autenticación. El consumidor PAM
+> debe ejecutar el módulo con EUID 0. El estado es volátil y se reinicia al
+> arrancar el sistema.
+>
+> El código del iniciador se consume inmediatamente después de validarlo, antes
+> de pedir el autorizador. Si el segundo usuario falla o cancela, el iniciador
+> debe esperar al siguiente código. Esto evita que dos sesiones paralelas avancen
+> con el mismo primer TOTP.
 
 ### Auditoría (Logs)
 El módulo escribe en `/var/log/auth.log` (o `syslog`):
