@@ -16,74 +16,82 @@ El objetivo es demostrar diferentes estrategias de integración de códigos OTP 
 
 ## 📂 Estructura del Proyecto
 
-El repositorio se divide en seis módulos independientes, cada uno con su propia lógica de seguridad y experiencia de usuario (UX):
+El repositorio se divide en siete módulos independientes, cada uno con su propia lógica de seguridad y experiencia de usuario (UX):
 
 ### 1. 🥪 `pam-sandwich` (Estrategia de Fusión TOTP)
-Un enfoque experimental donde el código TOTP estándar (Google Authenticator) se "esconde" dentro de la contraseña del usuario.
-*   **Mecanismo:** El usuario concatena el token OATH generado por una app.
-*   **Formato:** `[3 dígitos] + [Contraseña] + [3 dígitos]`.
-*   **Caso de uso:** Clientes SSH o interfaces antiguas que no soportan `KbdInteractive` o para ocultar el uso de 2FA en un solo input.
-*   **🔗 [Ir a la documentación de pam-sandwich](./pam-sandwich/README.md)**
+Un enfoque experimental donde el código TOTP estándar se "esconde" dentro de la contraseña del usuario.
+* **Mecanismo:** concatena el token OATH con la contraseña.
+* **Formato:** `[3 dígitos] + [Contraseña] + [3 dígitos]`.
+* **🔗 [Documentación](./pam-sandwich/README.md)**
 
-### 2. 🛡️ `pam_strict_totp` (Estrategia Estándar Hardened)
-Una implementación de alta seguridad diseñada bajo estándares **MISRA-C**. Sigue el flujo estándar de desafío-respuesta.
-*   **Mecanismo:** Autenticación en dos pasos separados e interactivos.
-*   **Formato:** Primero pide `Password` -> Si es correcto, pide `Verification Code`.
-*   **Características:** Fail-close por defecto, separación de privilegios, protección contra ataques de repetición y rate limiting.
-*   **🔗 [Ir a la documentación de pam_strict_totp](./pam_strict_totp/README.md)**
+### 2. 🛡️ `pam_strict_totp` (TOTP estándar endurecido)
+Implementación minimalista del flujo TOTP clásico.
+* **Mecanismo:** contraseña y código de verificación en prompts separados.
+* **Características:** fail-close, separación temporal de privilegios, antirreplay y rate limiting.
+* **🔗 [Documentación](./pam_strict_totp/README.md)**
 
-### 3. ⏳ `pam_chronoguard` (Ofuscación Temporal Dinámica)
-Un módulo de "Defensa Dinámica" que implementa una estrategia de **Sandwich Temporal Personalizable** sin dispositivos externos.
-*   **Mecanismo:** El usuario define reglas de tiempo en su perfil (ej. `PRE=HH`, `POST=DD`).
-*   **Formato:** `[Prefijo Temporal] + [Contraseña] + [Sufijo Temporal]`.
-*   **Caso de uso:** Protección contra Keyloggers y Shoulder Surfing mediante "MFA Cognitivo" (lo que sabes + cuándo lo sabes).
-*   **Seguridad:** Código auditado (CERT-C), limpieza de memoria activa (Anti-Forensic) y validación de permisos estricta.
-*   **🔗 [Ir a la documentación de pam_chronoguard](./pam_chronoguard/README.md)**
+### 3. 🧭 `pam_totp_domains` (TOTP separado por servicio)
+Utiliza un secreto TOTP diferente para cada servicio PAM.
+* **Mecanismo:** `PAM_SERVICE=sshd` selecciona `sshd.secret`; `sudo` selecciona `sudo.secret`.
+* **Caso de uso:** limitar el impacto de la filtración de un secreto y evitar reutilizar el mismo factor entre SSH, `sudo`, `login` y `su`.
+* **Seguridad:** lista cerrada de servicios, lectura segura de archivos, permisos estrictos y estado antirreplay independiente por dominio.
+* **🔗 [Documentación](./pam_totp_domains/README.md)**
 
-### 4. 🏦 `pam_partial_key` (Estrategia Bancaria)
-Implementación del método clásico de autenticación parcial donde nunca se envía la contraseña completa por la red.
-*   **Mecanismo:** El sistema solicita caracteres en índices aleatorios (ej. "Introduce posiciones 2, 8 y 14").
-*   **Formato:** Prompt: `Posiciones [2] [8] [14]:` -> Input: `a 7 H`.
-*   **Caso de uso:** Entornos hostiles con alto riesgo de **Keyloggers**. Si un atacante captura las teclas, solo obtiene 3 caracteres desordenados inservibles para futuros intentos.
-*   **Seguridad:** Hashing posicional (SHA256 + Salt + Index) y comparación de tiempo constante. No es MFA y la repetición de posiciones puede permitir reutilizar respuestas observadas; consulta sus límites antes de desplegarlo.
-*   **🔗 [Ir a la documentación de pam_partial_key](./pam_partial_key/README.md)**
+### 4. ⏳ `pam_chronoguard` (Ofuscación temporal dinámica)
+Implementa un sandwich temporal personalizable sin dispositivos externos.
+* **Mecanismo:** el usuario define reglas de tiempo como `PRE=HH` y `POST=DD`.
+* **Formato:** `[Prefijo temporal] + [Contraseña] + [Sufijo temporal]`.
+* **🔗 [Documentación](./pam_chronoguard/README.md)**
 
-### 5. 🏫 `pam_school_schedule` (Estrategia de Horario Lectivo)
-Módulo de autenticación contextual que valida el acceso basándose en la agenda o cronograma del usuario.
-*   **Mecanismo:** El acceso solo se permite si el usuario tiene una actividad programada en el minuto exacto del login.
-*   **Formato:** Prompt: `Materia Actual (User):` -> Input: `REDES-45` (Palabra clave + Variable temporal).
-*   **Caso de uso:** Control estricto de acceso a laboratorios o servidores, permitiendo el login solo durante horas de clase o guardias específicas.
-*   **Seguridad:** Fail-Close (bloqueo total si no hay agenda), variables dinámicas (`%H`, `%M`) para aumentar entropía y *Zero Warnings Policy*.
-*   **🔗 [Ir a la documentación de pam_school_schedule](./pam_school_schedule/README.md)**
+### 5. 🏦 `pam_partial_key` (Autenticación parcial)
+Solicita caracteres concretos de una clave maestra.
+* **Mecanismo:** desafío de posiciones aleatorias.
+* **Seguridad:** hashing posicional y comparación de tiempo constante. No es MFA y observaciones repetidas pueden revelar posiciones.
+* **🔗 [Documentación](./pam_partial_key/README.md)**
 
-### 6. 👥 `pam_2man_totp` (Control Dual / Two-Man Rule)
-Implementación del principio de **integridad de dos personas** (TPI), similar a los protocolos de lanzamiento de misiles o apertura de bóvedas de alta seguridad.
-*   **Mecanismo:** El acceso requiere la autenticación criptográfica secuencial de dos usuarios distintos (Iniciador + Autorizador).
-*   **Formato:** Login User A -> TOTP A -> Prompt User B (Wheel) -> TOTP B.
-*   **Caso de uso:** Operaciones críticas (SSH Root, Sudo) donde ningún administrador debe poder actuar solo (prevención de Insider Threat).
-*   **Seguridad:** Anti-Auto-Aprobación, Drop Privileges, Memoria Segura y validación estricta de grupo `wheel`.
-*   **🔗 [Ir a la documentación de pam_2man_totp](./pam_2man_totp/README.md)**
+### 6. 🏫 `pam_school_schedule` (Horario lectivo)
+Valida el acceso según la agenda local del usuario.
+* **Mecanismo:** solo permite autenticación durante una franja configurada.
+* **Formato:** palabra clave más variable temporal.
+* **🔗 [Documentación](./pam_school_schedule/README.md)**
+
+### 7. 👥 `pam_2man_totp` (Control dual)
+Requiere la autenticación secuencial de dos usuarios distintos.
+* **Mecanismo:** TOTP del iniciador y TOTP de un autorizador privilegiado.
+* **Caso de uso:** operaciones críticas donde ningún administrador debe actuar solo.
+* **🔗 [Documentación](./pam_2man_totp/README.md)**
 
 ---
 
-## ⚡ Comparativa Rápida
+## ⚡ Comparativa rápida
 
-| Característica | pam-sandwich 🥪 | pam_strict_totp 🛡️ | pam_chronoguard ⏳ | pam_partial_key 🏦 | pam_school_schedule 🏫 | pam_2man_totp 👥 |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Tecnología Base** | TOTP (OATH) | TOTP (OATH) | Tiempo (Pattern) | Partial Hash (SHA256) | Agenda / Reloj | TOTP (Dual/OATH) |
-| **Experiencia UX** | 1 Solo Prompt | 2 Prompts | 1 Solo Prompt | Interactivo (Desafío) | Prompt Contextual | 4 Pasos (Multi-User) |
-| **Dependencia** | App Móvil | App Móvil | Reloj Mental | Clave Mental / Fichero | Configuración (File) | 2 Personas + Apps |
-| **Complejidad Uso** | Media | Baja | Alta | Media (Visual) | Media (Cálculo) | Muy Alta (Coord.) |
-| **Nivel Seguridad** | Medio (Obscurity) | Muy Alto (Hardened) | Alto (Anti-Forensic) | Alto (Anti-Keylogger) | Alto (Fail-Close) | **Crítica (Military)** |
-| **Mitigación Principal** | Phishing Simple | Fuerza Bruta / Robo | Shoulder Surfing | **Keyloggers / Replay** | **Acceso Fuera Horario** | **Insider Threat** |
+| Módulo | Tecnología base | UX | Dependencia principal | Mitigación principal |
+| :--- | :--- | :--- | :--- | :--- |
+| `pam-sandwich` | TOTP | Un prompt | App TOTP | Compatibilidad con clientes limitados |
+| `pam_strict_totp` | TOTP | Dos prompts | App TOTP | Fuerza bruta y repetición |
+| `pam_totp_domains` | TOTP por servicio | Un prompt TOTP | Varios secretos TOTP | Reutilización y compromiso transversal |
+| `pam_chronoguard` | Patrón temporal | Un prompt | Regla mental | Observación parcial |
+| `pam_partial_key` | Hash posicional | Desafío | Clave mental | Captura parcial por keylogger |
+| `pam_school_schedule` | Agenda y reloj | Prompt contextual | Configuración local | Acceso fuera de horario |
+| `pam_2man_totp` | TOTP dual | Cuatro pasos | Dos personas | Amenaza interna individual |
 
 ---
 
-## 🛠️ Requisitos Generales
-
-Para compilar cualquiera de los módulos en sistemas Debian/Ubuntu, se recomiendan las siguientes librerías base (incluyendo OpenSSL para el módulo bancario):
+## 🛠️ Requisitos generales
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential libpam0g-dev liboath-dev libssl-dev
+```
+
+La verificación completa del repositorio se ejecuta con:
+
+```bash
+make -C tests verify
+```
+
+El módulo `pam_totp_domains` añade además su propia puerta específica:
+
+```bash
+make -C pam_totp_domains verify
 ```
