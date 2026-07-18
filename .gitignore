@@ -56,3 +56,6 @@ dkms.conf
 
 # Local test artifacts
 /tests/build/
+/pam_totp_domains/build/
+/pam_totp_shuffle/build/
+/pam_totp_shuffle/*.plist
