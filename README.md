@@ -10,8 +10,8 @@ Colección experimental y educativa de módulos **PAM (Pluggable Authentication 
 | :--- | :--- | :--- |
 | `pam-sandwich` | Integrada en `main` | [README](./pam-sandwich/README.md) |
 | `pam_strict_totp` | Integrada en `main` | [README](./pam_strict_totp/README.md) |
-| `pam_totp_domains` | PR #2 abierta | [PR #2](https://github.com/soyunomas/pam-totp-lab/pull/2) |
-| `pam_totp_shuffle` | PR #3 abierta | [PR #3](https://github.com/soyunomas/pam-totp-lab/pull/3) |
+| `pam_totp_domains` | Integrada en `main` | [README](./pam_totp_domains/README.md) |
+| `pam_totp_shuffle` | Integrada en `main` | [README](./pam_totp_shuffle/README.md) |
 | `pam_totp_slot_challenge` | Integrada en `main` | [README](./pam_totp_slot_challenge/README.md) |
 | `pam_chronoguard` | Integrada en `main` | [README](./pam_chronoguard/README.md) |
 | `pam_partial_key` | Integrada en `main` | [README](./pam_partial_key/README.md) |
