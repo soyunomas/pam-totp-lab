@@ -54,7 +54,7 @@ dkms.conf
 # debug information files
 *.dwo
 
-# Local test artifacts
+# Local test and analyzer artifacts
 /tests/build/
 /pam_totp_domains/build/
 /pam_totp_shuffle/build/
