@@ -50,6 +50,8 @@ make verify
 
 La puerta completa cubre las 720 permutaciones posibles, generación aleatoria repetida, entradas inválidas, permisos inseguros, symlinks, hard links, secretos multilínea, GCC, Clang, análisis estático, sanitizers, Valgrind y hardening ELF.
 
+La compilación de verificación trata todos los avisos admitidos como errores para impedir que una regresión se integre silenciosamente.
+
 ## Instalación
 
 ```bash
