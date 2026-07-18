@@ -34,6 +34,8 @@ sudo make install
 
 `make verify` ejecuta pruebas funcionales y negativas, análisis estático, Valgrind, AddressSanitizer, UndefinedBehaviorSanitizer y comprobaciones ELF de Full RELRO, pila no ejecutable y ausencia de RPATH, RUNPATH y TEXTREL.
 
+La suite elimina sus fixtures mediante operaciones directas sobre descriptores y no invoca una shell durante la limpieza.
+
 ## Configuración del usuario
 
 ```bash
