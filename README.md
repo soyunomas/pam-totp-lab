@@ -4,22 +4,22 @@ Colección experimental y educativa de módulos **PAM (Pluggable Authentication 
 
 > **Compatibilidad:** varios módulos leen archivos de usuario mediante cambios temporales de EUID, EGID y grupos. Ese modelo está orientado a consumidores PAM aislados por proceso, como los flujos habituales de SSH o `sudo`; no debe asumirse seguro para una aplicación multihilo sin rediseñar primero el acceso a credenciales. `pam_partial_key` también crea un proceso auxiliar y mantiene la misma restricción de despliegue.
 
-## Estado de integración
+## Resumen de implementaciones
 
-El inventario actual contiene diez implementaciones. Todas disponen de un directorio propio y documentación específica dentro del repositorio.
+El repositorio contiene diez implementaciones. Todas disponen de un directorio propio y documentación específica.
 
-| Implementación | Estado | Documentación |
+| Implementación | Descripción breve | Documentación |
 | :--- | :--- | :--- |
-| `pam-sandwich` | Integrada en `main` | [README](./pam-sandwich/README.md) |
-| `pam_strict_totp` | Integrada en `main` | [README](./pam_strict_totp/README.md) |
-| `pam_totp_domains` | Integrada en `main` | [README](./pam_totp_domains/README.md) |
-| `pam_totp_shuffle` | Integrada en `main` | [README](./pam_totp_shuffle/README.md) |
-| `pam_totp_slot_challenge` | Integrada en `main` | [README](./pam_totp_slot_challenge/README.md) |
-| `pam_chronoguard` | Integrada en `main` | [README](./pam_chronoguard/README.md) |
-| `pam_partial_key` | Integrada en `main` | [README](./pam_partial_key/README.md) |
-| `pam_school_schedule` | Integrada en `main` | [README](./pam_school_schedule/README.md) |
-| `pam_2man_totp` | Integrada en `main` | [README](./pam_2man_totp/README.md) |
-| `pam_schedule_totp_override` | Integrada en `main` | [README](./pam_schedule_totp_override/README.md) |
+| `pam-sandwich` | Combina TOTP y contraseña en un único campo de entrada. | [README](./pam-sandwich/README.md) |
+| `pam_strict_totp` | Implementa TOTP clásico endurecido con antirreplay local. | [README](./pam_strict_totp/README.md) |
+| `pam_totp_domains` | Usa un secreto TOTP distinto según el servicio PAM. | [README](./pam_totp_domains/README.md) |
+| `pam_totp_shuffle` | Solicita los dígitos TOTP en un orden aleatorio. | [README](./pam_totp_shuffle/README.md) |
+| `pam_totp_slot_challenge` | Selecciona aleatoriamente uno de varios secretos TOTP. | [README](./pam_totp_slot_challenge/README.md) |
+| `pam_chronoguard` | Añade patrones derivados del tiempo a una contraseña. | [README](./pam_chronoguard/README.md) |
+| `pam_partial_key` | Solicita posiciones aleatorias de una clave maestra. | [README](./pam_partial_key/README.md) |
+| `pam_school_schedule` | Autoriza el acceso según una agenda y la hora local. | [README](./pam_school_schedule/README.md) |
+| `pam_2man_totp` | Exige la autenticación secuencial de dos usuarios. | [README](./pam_2man_totp/README.md) |
+| `pam_schedule_totp_override` | Permite una excepción TOTP docente fuera del horario asignado. | [README](./pam_schedule_totp_override/README.md) |
 
 ## 📂 Implementaciones
 
