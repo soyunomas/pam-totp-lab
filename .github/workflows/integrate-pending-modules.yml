@@ -22,6 +22,9 @@ jobs:
       github.head_ref == 'integration/all-modules' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
       - name: Checkout integration branch
         uses: actions/checkout@v4
@@ -78,13 +81,47 @@ jobs:
           path.write_text(text, encoding="utf-8")
           Path(".github/integration-trigger").unlink(missing_ok=True)
 
+      - name: Install verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            libpam0g-dev \
+            liboath-dev \
+            libssl-dev \
+            valgrind \
+            binutils
+
+      - name: Verify imported modules with concise diagnostics
+        run: |
+          set +e
+          for module in pam_totp_domains pam_totp_shuffle
+          do
+            chmod +x "$module/verify.sh"
+            make -C "$module" verify > "/tmp/${module}.log" 2>&1
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              {
+                echo "## Fallo de verificación en \`$module\`"
+                echo
+                echo '```text'
+                tail -n 120 "/tmp/${module}.log"
+                echo '```'
+              } > /tmp/verification-comment.md
+              gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/verification-comment.md
+              cat /tmp/verification-comment.md
+              exit "$status"
+            fi
+          done
+
       - name: Commit integrated modules
         run: |
           if git diff --quiet && git diff --cached --quiet; then
             exit 0
           fi
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add README.md pam_totp_domains pam_totp_shuffle .github/integration-trigger
           git commit -m "Integrar pam_totp_domains y pam_totp_shuffle"
           git push origin HEAD:integration/all-modules
@@ -125,7 +162,7 @@ jobs:
       - name: Remove temporary integration workflow
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git rm .github/workflows/integrate-pending-modules.yml
           git commit -m "ci: remove temporary integration workflow"
           git push origin HEAD:main
