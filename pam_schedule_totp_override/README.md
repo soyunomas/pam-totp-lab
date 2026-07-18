@@ -2,7 +2,7 @@
 
 Módulo PAM local para aplicar horarios de acceso por cuenta y permitir una excepción fuera de horario mediante un TOTP docente específico para esa cuenta.
 
-El módulo **no valida la contraseña**. Debe colocarse después de `pam_unix.so` o del mecanismo de contraseña habitual:
+El módulo **no valida la contraseña**. Debe colocarse después de `pam_unix.so` o del mecanismo de contraseña habitual, configurado para detener el stack inmediatamente si la contraseña falla:
 
 ```text
 contraseña correcta
@@ -70,6 +70,7 @@ La sintaxis es cerrada:
 - `default=ignore` devuelve `PAM_IGNORE` para cuentas no listadas.
 - `default=deny` deniega cuentas no listadas.
 - Cada cuenta aparece una sola vez en la versión 1.
+- Cada nombre de secreto solo puede asignarse a una cuenta.
 - Los días admitidos son `Mo`, `Tu`, `We`, `Th`, `Fr`, `Sa` y `Su`.
 - Se admiten listas y rangos ascendentes, por ejemplo `Mo-Fr,Su`.
 - Las horas usan `HHMM-HHMM` y el final es exclusivo.
@@ -114,10 +115,12 @@ Prueba primero en un servicio PAM aislado y conserva una sesión administrativa 
 Ejemplo conceptual:
 
 ```pam
-auth    required pam_unix.so
-auth    required pam_schedule_totp_override.so
-account required pam_schedule_totp_override.so
+auth    requisite pam_unix.so
+auth    required  pam_schedule_totp_override.so
+account required  pam_schedule_totp_override.so
 ```
+
+El control `requisite` evita solicitar o consumir un TOTP docente cuando la contraseña anterior es incorrecta. Adapta el stack al servicio concreto y revisa sus módulos existentes antes de desplegarlo.
 
 Dentro del horario, el módulo no muestra un segundo prompt. Fuera del horario muestra:
 
