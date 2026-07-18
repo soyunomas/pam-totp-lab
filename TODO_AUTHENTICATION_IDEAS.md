@@ -741,9 +741,11 @@ Centro - Excepción C
 ```
 
 ```text
-user=A;days=Mo-Fr;time=0800-1400;override=A.secret
-user=B;days=Mo-Fr;time=1400-2000;override=B.secret
-user=C;days=Mo-Fr;time=2000-2359;override=C.secret
+version=1
+default=ignore
+user=A;days=Mo-Fr;time=0800-1400;secret=A.secret
+user=B;days=Mo-Fr;time=1400-2000;secret=B.secret
+user=C;days=Mo-Fr;time=2000-0200;secret=C.secret
 ```
 
 La sintaxis real deberá ser pequeña, versionada, sin expresiones ambiguas y con una política explícita para zonas horarias, cambios de hora y días festivos.
