@@ -6,6 +6,8 @@ Colección experimental y educativa de módulos **PAM (Pluggable Authentication 
 
 ## Estado de integración
 
+El inventario actual contiene nueve implementaciones. Todas disponen de un directorio propio y documentación específica dentro del repositorio.
+
 | Implementación | Estado | Documentación |
 | :--- | :--- | :--- |
 | `pam-sandwich` | Integrada en `main` | [README](./pam-sandwich/README.md) |
