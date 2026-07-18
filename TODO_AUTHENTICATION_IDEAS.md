@@ -682,6 +682,8 @@ Debe mantenerse como investigación y no presentarse como una solución universa
 
 ## 11. `pam_schedule_totp_override`: excepción horaria autorizada por profesor
 
+> **Estado:** implementado en `pam_schedule_totp_override/`, con pruebas de política, archivos, concurrencia, integración PAM y endurecimiento.
+
 ### Idea
 
 Combinar una política horaria normal con una excepción TOTP supervisada. Cada cuenta puede autenticarse sin excepción únicamente durante su franja asignada:
@@ -765,31 +767,31 @@ Por seguridad operativa, es preferible que el profesor introduzca el código dir
 
 ### Desarrollo
 
-- [ ] `SCHEDOVR-01` Definir una lista cerrada de usuarios o grupos sujetos a la política.
-- [ ] `SCHEDOVR-02` Implementar franjas sin solapamientos ambiguos y con límites exactos.
-- [ ] `SCHEDOVR-03` Obtener fecha y hora del sistema sin confiar en variables del cliente.
-- [ ] `SCHEDOVR-04` Exigir un secreto de excepción diferente por cuenta o ámbito autorizado.
-- [ ] `SCHEDOVR-05` Guardar configuración y secretos únicamente en archivos protegidos por `root`.
-- [ ] `SCHEDOVR-06` Validar TOTP estándar con una ventana pequeña.
-- [ ] `SCHEDOVR-07` Mantener antirreplay por usuario, servicio, secreto y contador.
-- [ ] `SCHEDOVR-08` Aplicar rate limiting a los intentos fuera de horario.
-- [ ] `SCHEDOVR-09` Registrar usuario, servicio, instante y resultado sin registrar credenciales.
-- [ ] `SCHEDOVR-10` Definir rotación y revocación inmediata de secretos docentes.
-- [ ] `SCHEDOVR-11` Probar cambios de hora, reloj adelantado o atrasado y cruces de medianoche.
-- [ ] `SCHEDOVR-12` Documentar que la política se comprueba al autenticar y no finaliza sesiones ya abiertas.
+- [x] `SCHEDOVR-01` Definir una lista cerrada de usuarios o grupos sujetos a la política.
+- [x] `SCHEDOVR-02` Implementar franjas sin solapamientos ambiguos y con límites exactos.
+- [x] `SCHEDOVR-03` Obtener fecha y hora del sistema sin confiar en variables del cliente.
+- [x] `SCHEDOVR-04` Exigir un secreto de excepción diferente por cuenta o ámbito autorizado.
+- [x] `SCHEDOVR-05` Guardar configuración y secretos únicamente en archivos protegidos por `root`.
+- [x] `SCHEDOVR-06` Validar TOTP estándar con una ventana pequeña.
+- [x] `SCHEDOVR-07` Mantener antirreplay por usuario, servicio, secreto y contador.
+- [x] `SCHEDOVR-08` Aplicar rate limiting a los intentos fuera de horario.
+- [x] `SCHEDOVR-09` Registrar usuario, servicio, instante y resultado sin registrar credenciales.
+- [x] `SCHEDOVR-10` Definir rotación y revocación inmediata de secretos docentes.
+- [x] `SCHEDOVR-11` Probar cambios de hora, reloj adelantado o atrasado y cruces de medianoche.
+- [x] `SCHEDOVR-12` Documentar que la política se comprueba al autenticar y no finaliza sesiones ya abiertas.
 
 ### Pruebas de aceptación
 
-- [ ] A puede entrar por la mañana sin TOTP de excepción.
-- [ ] B no puede entrar por la mañana usando solo la contraseña compartida.
-- [ ] B puede entrar por la mañana con el TOTP específico de B.
-- [ ] El TOTP de A no autoriza a B ni a C.
-- [ ] Un TOTP aceptado no puede reutilizarse en otro intento o servicio.
-- [ ] Un secreto ausente, corrupto o con permisos inseguros produce denegación.
-- [ ] Una configuración horaria solapada, incompleta o inválida produce denegación.
-- [ ] Los intentos concurrentes no aceptan dos veces el mismo contador.
-- [ ] Los logs permiten auditar la excepción sin revelar el código.
-- [ ] Cambiar la hora del cliente no altera la decisión del servidor.
+- [x] A puede entrar por la mañana sin TOTP de excepción.
+- [x] B no puede entrar por la mañana usando solo la contraseña compartida.
+- [x] B puede entrar por la mañana con el TOTP específico de B.
+- [x] El TOTP de A no autoriza a B ni a C.
+- [x] Un TOTP aceptado no puede reutilizarse en otro intento o servicio.
+- [x] Un secreto ausente, corrupto o con permisos inseguros produce denegación.
+- [x] Una configuración horaria solapada, incompleta o inválida produce denegación.
+- [x] Los intentos concurrentes no aceptan dos veces el mismo contador.
+- [x] Los logs permiten auditar la excepción sin revelar el código.
+- [x] Cambiar la hora del cliente no altera la decisión del servidor.
 
 ### Ventajas
 
