@@ -6,12 +6,14 @@ Colección experimental y educativa de módulos **PAM (Pluggable Authentication 
 
 ## Estado de integración
 
+El inventario actual contiene nueve implementaciones. Todas disponen de un directorio propio y documentación específica dentro del repositorio.
+
 | Implementación | Estado | Documentación |
 | :--- | :--- | :--- |
 | `pam-sandwich` | Integrada en `main` | [README](./pam-sandwich/README.md) |
 | `pam_strict_totp` | Integrada en `main` | [README](./pam_strict_totp/README.md) |
-| `pam_totp_domains` | PR #2 abierta | [PR #2](https://github.com/soyunomas/pam-totp-lab/pull/2) |
-| `pam_totp_shuffle` | PR #3 abierta | [PR #3](https://github.com/soyunomas/pam-totp-lab/pull/3) |
+| `pam_totp_domains` | Integrada en `main` | [README](./pam_totp_domains/README.md) |
+| `pam_totp_shuffle` | Integrada en `main` | [README](./pam_totp_shuffle/README.md) |
 | `pam_totp_slot_challenge` | Integrada en `main` | [README](./pam_totp_slot_challenge/README.md) |
 | `pam_chronoguard` | Integrada en `main` | [README](./pam_chronoguard/README.md) |
 | `pam_partial_key` | Integrada en `main` | [README](./pam_partial_key/README.md) |
@@ -26,6 +28,7 @@ Inserta un TOTP estándar alrededor de la contraseña para clientes con interfac
 
 - Formato: `[3 dígitos] + [contraseña] + [3 dígitos]`.
 - Alcance: compatibilidad y ofuscación; no sustituye un flujo MFA explícito.
+- [Documentación](./pam-sandwich/README.md)
 
 ### 2. `pam_strict_totp`
 
@@ -33,6 +36,7 @@ Implementación endurecida del desafío TOTP clásico.
 
 - Contraseña y TOTP en prompts separados.
 - Fail-closed, limpieza de memoria y antirreplay local.
+- [Documentación](./pam_strict_totp/README.md)
 
 ### 3. `pam_totp_domains`
 
@@ -42,6 +46,7 @@ Utiliza un secreto TOTP diferente según el servicio indicado por `PAM_SERVICE`.
 - Secretos separados en `~/.pam_totp_domains/`.
 - Antirreplay independiente por usuario y servicio.
 - Limita el impacto transversal de la filtración de un único secreto.
+- [Documentación](./pam_totp_domains/README.md)
 
 ### 4. `pam_totp_shuffle`
 
@@ -50,6 +55,7 @@ Solicita los seis dígitos de un TOTP en un orden aleatorio y reconstruye intern
 - Permutación uniforme mediante `getrandom()`.
 - Ejemplo: orden `4-1-6-2-5-3`; para `123456`, la respuesta es `416253`.
 - Es un experimento de interfaz frente a observaciones parciales; no añade un factor ni aumenta la seguridad criptográfica de TOTP.
+- [Documentación](./pam_totp_shuffle/README.md)
 
 ### 5. `pam_totp_slot_challenge`
 
@@ -59,6 +65,7 @@ Selecciona aleatoriamente uno de 2–4 secretos TOTP de un mismo usuario.
 - Lectura segura de `~/.pam_totp_slots/*.secret`.
 - Antirreplay independiente por slot.
 - No es un quorum ni un factor adicional.
+- [Documentación](./pam_totp_slot_challenge/README.md)
 
 ### 6. `pam_chronoguard`
 
@@ -66,6 +73,7 @@ Aplica prefijos y sufijos derivados del tiempo a una contraseña.
 
 - Configuración local de patrones como `PRE=HH` y `POST=DD`.
 - Mecanismo experimental de ofuscación temporal.
+- [Documentación](./pam_chronoguard/README.md)
 
 ### 7. `pam_partial_key`
 
@@ -73,6 +81,7 @@ Solicita posiciones aleatorias de una clave maestra.
 
 - Hashing posicional y comparación de tiempo constante.
 - No es MFA; observaciones repetidas pueden revelar posiciones.
+- [Documentación](./pam_partial_key/README.md)
 
 ### 8. `pam_school_schedule`
 
@@ -80,6 +89,7 @@ Autoriza según una agenda local y variables temporales.
 
 - Diseñado para laboratorios o accesos restringidos por horario.
 - Falla de forma cerrada si la configuración no es válida.
+- [Documentación](./pam_school_schedule/README.md)
 
 ### 9. `pam_2man_totp`
 
@@ -87,6 +97,7 @@ Requiere la autenticación secuencial de dos usuarios distintos.
 
 - TOTP del iniciador y de un autorizador privilegiado.
 - Orientado a operaciones donde una sola persona no debe actuar sola.
+- [Documentación](./pam_2man_totp/README.md)
 
 ## ⚡ Comparativa rápida
 
