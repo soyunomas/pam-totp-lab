@@ -6,7 +6,7 @@ Colección experimental y educativa de módulos **PAM (Pluggable Authentication 
 
 ## Estado de integración
 
-El inventario actual contiene nueve implementaciones. Todas disponen de un directorio propio y documentación específica dentro del repositorio.
+El inventario actual contiene diez implementaciones. Todas disponen de un directorio propio y documentación específica dentro del repositorio.
 
 | Implementación | Estado | Documentación |
 | :--- | :--- | :--- |
@@ -19,6 +19,7 @@ El inventario actual contiene nueve implementaciones. Todas disponen de un direc
 | `pam_partial_key` | Integrada en `main` | [README](./pam_partial_key/README.md) |
 | `pam_school_schedule` | Integrada en `main` | [README](./pam_school_schedule/README.md) |
 | `pam_2man_totp` | Integrada en `main` | [README](./pam_2man_totp/README.md) |
+| `pam_schedule_totp_override` | Implementada en rama | [README](./pam_schedule_totp_override/README.md) |
 
 ## 📂 Implementaciones
 
@@ -99,6 +100,17 @@ Requiere la autenticación secuencial de dos usuarios distintos.
 - Orientado a operaciones donde una sola persona no debe actuar sola.
 - [Documentación](./pam_2man_totp/README.md)
 
+### 10. `pam_schedule_totp_override`
+
+Aplica un horario por cuenta y exige un TOTP docente específico fuera de la franja ordinaria.
+
+- Configuración y secretos protegidos por `root`.
+- Intervalos exactos con soporte para cruces de medianoche.
+- Antirreplay por cuenta, servicio y secreto.
+- Limitación concurrente de intentos mediante reloj monotónico.
+- No resuelve la falta de atribución causada por contraseñas compartidas.
+- [Documentación](./pam_schedule_totp_override/README.md)
+
 ## ⚡ Comparativa rápida
 
 | Módulo | Tecnología | Interacción | Mitigación o experimento principal |
@@ -112,6 +124,7 @@ Requiere la autenticación secuencial de dos usuarios distintos.
 | `pam_partial_key` | Hash posicional | Desafío de posiciones | Captura parcial por keylogger |
 | `pam_school_schedule` | Agenda y reloj | Prompt contextual | Acceso fuera de horario |
 | `pam_2man_totp` | TOTP dual | Cuatro pasos | Amenaza interna individual |
+| `pam_schedule_totp_override` | Horario + TOTP | Prompt solo fuera de horario | Excepciones docentes supervisadas |
 
 ## 🛠️ Requisitos generales
 
@@ -134,6 +147,7 @@ Puertas específicas disponibles cuando la carpeta correspondiente está present
 make -C pam_totp_domains verify
 make -C pam_totp_shuffle verify
 make -C pam_totp_slot_challenge verify
+make -C pam_schedule_totp_override verify
 ```
 
 ## Advertencia de despliegue
