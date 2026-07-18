@@ -1,7 +1,36 @@
 #include "keyfile.h"
 
+#include <openssl/evp.h>
 #include <stdlib.h>
 #include <string.h>
+
+int pk_hash_position(unsigned char output[PK_HASH_LEN],
+                     const unsigned char salt[PK_SALT_LEN], int index,
+                     char character)
+{
+    EVP_MD_CTX *context = NULL;
+    unsigned int digest_length = 0U;
+    int result = -1;
+
+    if (output == NULL || salt == NULL || index < 0 ||
+        index >= (int)PK_MAX_PASS_LEN) {
+        return -1;
+    }
+    memset(output, 0, PK_HASH_LEN);
+    context = EVP_MD_CTX_new();
+    if (context != NULL &&
+        EVP_DigestInit_ex(context, EVP_sha256(), NULL) == 1 &&
+        EVP_DigestUpdate(context, salt, PK_SALT_LEN) == 1 &&
+        EVP_DigestUpdate(context, &index, sizeof(index)) == 1 &&
+        EVP_DigestUpdate(context, &character, 1U) == 1 &&
+        EVP_DigestFinal_ex(context, output, &digest_length) == 1 &&
+        digest_length == PK_HASH_LEN) {
+        result = 0;
+    }
+    EVP_MD_CTX_free(context);
+    if (result != 0) memset(output, 0, PK_HASH_LEN);
+    return result;
+}
 
 void pk_key_data_clear(struct pk_key_data *data)
 {

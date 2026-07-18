@@ -17,6 +17,9 @@ struct pk_key_data {
 
 int pk_parse_key_data(const unsigned char *input, size_t input_len,
                       struct pk_key_data *data_out);
+int pk_hash_position(unsigned char output[PK_HASH_LEN],
+                     const unsigned char salt[PK_SALT_LEN], int index,
+                     char character);
 void pk_key_data_clear(struct pk_key_data *data);
 
 #endif

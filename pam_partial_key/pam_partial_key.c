@@ -13,7 +13,6 @@
 #include <grp.h>
 #include <limits.h>
 #include <openssl/crypto.h>
-#include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <pwd.h>
 #include <security/pam_ext.h>
@@ -42,36 +41,6 @@ static void secure_zero(void *value, size_t length)
         *bytes++ = 0U;
         length--;
     }
-}
-
-static int calc_hash(unsigned char output[PK_HASH_LEN],
-                     const unsigned char salt[PK_SALT_LEN], int index,
-                     char character)
-{
-    EVP_MD_CTX *context = NULL;
-    unsigned int digest_length = 0U;
-    int result = -1;
-
-    memset(output, 0, PK_HASH_LEN);
-    context = EVP_MD_CTX_new();
-    if (context == NULL) {
-        return -1;
-    }
-
-    if (EVP_DigestInit_ex(context, EVP_sha256(), NULL) == 1 &&
-        EVP_DigestUpdate(context, salt, PK_SALT_LEN) == 1 &&
-        EVP_DigestUpdate(context, &index, sizeof(index)) == 1 &&
-        EVP_DigestUpdate(context, &character, 1U) == 1 &&
-        EVP_DigestFinal_ex(context, output, &digest_length) == 1 &&
-        digest_length == PK_HASH_LEN) {
-        result = 0;
-    }
-
-    EVP_MD_CTX_free(context);
-    if (result != 0) {
-        secure_zero(output, PK_HASH_LEN);
-    }
-    return result;
 }
 
 static int write_all(int descriptor, const unsigned char *buffer,
@@ -407,8 +376,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     }
 
     for (size_t i = 0U; i < CHALLENGE_COUNT; i++) {
-        if (calc_hash(computed_hash, key_data.salt, (int)indices[i],
-                      clean_response[i]) != 0) {
+        if (pk_hash_position(computed_hash, key_data.salt, (int)indices[i],
+                             clean_response[i]) != 0) {
             goto cleanup;
         }
         mismatch |= (unsigned int)CRYPTO_memcmp(

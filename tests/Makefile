@@ -51,7 +51,7 @@ $(TEST_MODULE): pam_test_result.c | $(BUILD_DIR)
 $(PARSER_TEST): test_partial_key_parser.c ../pam_partial_key/keyfile.c \
 		../pam_partial_key/keyfile.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) test_partial_key_parser.c ../pam_partial_key/keyfile.c \
-		-o $@ $(LDFLAGS_EXTRA)
+		-o $@ -lcrypto $(LDFLAGS_EXTRA)
 
 $(CHRONO_TEST): test_chronoguard_helpers.c \
 		../pam_chronoguard/pam_chronoguard.c | $(BUILD_DIR)
@@ -69,9 +69,10 @@ $(REPLAY_TEST): test_totp_replay.c ../pam_common/totp_replay.c \
 	$(CC) -DTOTP_REPLAY_TESTING $(CFLAGS) test_totp_replay.c \
 		../pam_common/totp_replay.c -o $@ $(LDFLAGS_EXTRA)
 
-$(PK_MANAGER_TEST): ../pam_partial_key/pk_manager.c \
+$(PK_MANAGER_TEST): ../pam_partial_key/pk_manager.c ../pam_partial_key/keyfile.c \
 		../pam_partial_key/keyfile.h | $(BUILD_DIR)
 	$(CC) -DPK_MANAGER_TESTING $(CFLAGS) ../pam_partial_key/pk_manager.c \
+		../pam_partial_key/keyfile.c \
 		-o $@ -lcrypto \
 		$(LDFLAGS_EXTRA)
 
@@ -105,8 +106,10 @@ $(PRODUCTION_DIR)/pam_partial_key.so: ../pam_partial_key/pam_partial_key.c \
 		../pam_partial_key/keyfile.c -o $@ -lpam -lcrypto \
 		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
 
-$(PRODUCTION_DIR)/pk_manager: ../pam_partial_key/pk_manager.c | $(PRODUCTION_DIR)
-	$(CC) $(CFLAGS) $< -o $@ -pie -lcrypto $(HARDEN_LDFLAGS) \
+$(PRODUCTION_DIR)/pk_manager: ../pam_partial_key/pk_manager.c \
+		../pam_partial_key/keyfile.c | $(PRODUCTION_DIR)
+	$(CC) $(CFLAGS) ../pam_partial_key/pk_manager.c \
+		../pam_partial_key/keyfile.c -o $@ -pie -lcrypto $(HARDEN_LDFLAGS) \
 		$(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_school_schedule.so: ../pam_school_schedule/pam_school_schedule.c | $(PRODUCTION_DIR)
@@ -138,7 +141,8 @@ fuzz: | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/fuzz-artifacts
 	$(CLANG) -std=c11 -O1 -g -fno-omit-frame-pointer \
 		-fsanitize=fuzzer,address,undefined fuzz_partial_key_parser.c \
-		../pam_partial_key/keyfile.c -L$(CXX_STDLIB_DIR) -o $(PARSER_FUZZ)
+		../pam_partial_key/keyfile.c -L$(CXX_STDLIB_DIR) -lcrypto \
+		-o $(PARSER_FUZZ)
 	$(PARSER_FUZZ) -runs=10000 -max_len=4225 \
 		-artifact_prefix=$(BUILD_DIR)/fuzz-artifacts/
 

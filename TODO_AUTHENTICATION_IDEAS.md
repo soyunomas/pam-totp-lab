@@ -68,6 +68,7 @@ Se permite una herramienta de configuración o enrolamiento ejecutada manualment
 | 9 | `pam_totp_ticket` | Experimental | Alta | Sí |
 | 10 | `pam_totp_duress` | Investigación | Media | Sí |
 | 11 | `pam_schedule_totp_override` | Alto | Baja-media | Sí |
+| 12 | `pam_schedule_partial_key_override` | Alto | Media-alta | No |
 
 ---
 
@@ -821,6 +822,291 @@ Para una versión posterior, una utilidad administrativa podría crear un permis
 
 Alto como control de política y autorización excepcional en un entorno pequeño. No debe presentarse como identificación individual mientras las contraseñas sigan siendo compartidas. Su principal beneficio es impedir el acceso fuera de horario sin presencia o autorización del profesor.
 
+## 12. `pam_schedule_partial_key_override`: excepción horaria mediante clave parcial docente
+
+> **Estado:** implementación inicial disponible en
+> `pam_schedule_partial_key_override/`, con pruebas de núcleo, integración PAM,
+> análisis estático y hardening. Permanecen abiertas las tareas de fuzzing,
+> validación ampliada de concurrencia y piloto controlado.
+
+### Idea
+
+Conservar la política horaria de `pam_schedule_totp_override`, pero sustituir
+el TOTP de excepción por un desafío de tres posiciones de una clave maestra
+controlada por el profesor:
+
+```text
+contraseña de la cuenta correcta
+    ├── dentro del horario → acceso ordinario
+    └── fuera del horario
+          └── posiciones aleatorias de la clave docente → excepción
+```
+
+Ejemplo:
+
+```text
+Acceso fuera de horario. Clave docente, posiciones [12] [3] [19]:
+```
+
+El profesor introduce los tres caracteres en el orden solicitado. La clave
+completa nunca se almacena ni se introduce durante una autenticación normal.
+El servidor conserva un hash independiente por posición, combinado con una sal
+aleatoria, en un archivo protegido por `root`.
+
+Este módulo no utiliza TOTP y constituye una excepción deliberada al foco TOTP
+del laboratorio. Es un mecanismo local de autorización por conocimiento, no un
+código de un solo uso ni un segundo factor por sí mismo.
+
+### Decisiones de arquitectura
+
+- Crear el directorio independiente `pam_schedule_partial_key_override/`.
+- Reutilizar la evaluación de horarios mediante una API común pequeña, sin
+  enlazar un módulo PAM dentro de otro ni duplicar parsers silenciosamente.
+- Extraer de `pam_partial_key` únicamente primitivas puras y auditables para
+  serialización, parsing, hashing posicional y comparación constante.
+- Mantener en el nuevo módulo la orquestación PAM, el rate limiting, la marca
+  de autorización entre `auth` y `account`, la auditoría y el estado de retos.
+- Usar una herramienta administrativa específica para enrolar claves docentes;
+  no reutilizar `pk_manager` cambiando `HOME` ni aceptar la clave por argumentos.
+- Permitir un autorizador docente por regla en la versión 1. Varios usuarios
+  pueden referenciarlo de forma explícita, documentando que su compromiso
+  afecta a todas las cuentas asignadas.
+- No instalar el módulo automáticamente en `common-auth`.
+
+### Configuración conceptual
+
+```text
+/etc/security/pam-schedule-partial-key.conf
+```
+
+```text
+version=1
+default=ignore
+user=A;days=Mo-Fr;time=0800-1400;authorizer=profesor-1
+user=B;days=Mo-Fr;time=1400-2000;authorizer=profesor-1
+user=C;days=Mo-Fr;time=2000-0200;authorizer=profesor-2
+```
+
+Claves posicionales:
+
+```text
+/etc/security/pam-schedule-partial-key/
+├── profesor-1.pkey
+└── profesor-2.pkey
+```
+
+La configuración y el directorio serán `root:root`, archivos regulares, sin
+enlaces, con un solo enlace físico y permisos `0600`/`0700`. Los identificadores
+de autorizador utilizarán una sintaxis cerrada y nunca se interpretarán como
+rutas.
+
+### Flujo PAM recomendado
+
+```pam
+auth    requisite pam_unix.so
+auth    required  pam_schedule_partial_key_override.so
+account required  pam_schedule_partial_key_override.so
+```
+
+1. `pam_unix.so` valida primero la contraseña y corta el stack si falla.
+2. El nuevo módulo obtiene exclusivamente `PAM_USER`, `PAM_SERVICE` y la hora
+   del servidor.
+3. Dentro del horario devuelve éxito sin mostrar un segundo prompt.
+4. Fuera del horario aplica rate limiting antes de generar el desafío.
+5. Selecciona tres posiciones distintas mediante aleatoriedad criptográfica y
+   valida exactamente tres caracteres contra hashes posicionales.
+6. Un éxito crea en el `pam_handle` una marca acotada a usuario, UID, servicio,
+   autorizador e instante monotónico.
+7. `pam_sm_acct_mgmt` exige esa marca fuera del horario y deniega si falta,
+   caducó o no coincide.
+8. Se audita el resultado sin registrar posiciones, respuesta, clave, hashes ni
+   sal.
+
+### Antirreplay y límite estructural
+
+Una clave parcial no tiene contador ni caducidad. Si vuelve a aparecer el mismo
+trío ordenado de posiciones, una respuesta observada podría reutilizarse. Por
+ello no se afirmará que el mecanismo ofrece el antirreplay criptográfico de un
+TOTP.
+
+La primera versión debe mantener un registro persistente de desafíos aceptados,
+ligado como mínimo a:
+
+```text
+usuario + servicio + autorizador + identidad de la clave + trío ordenado
+```
+
+Un trío consumido no volverá a emitirse mientras siga vigente esa clave. El
+estado se actualizará con bloqueo exclusivo, archivo temporal, `fsync` y
+renombrado atómico. Un error o corrupción del estado deniega el acceso. La
+rotación de la clave crea una identidad nueva y un espacio de desafíos nuevo.
+
+Esta mitigación no impide que observaciones de tríos diferentes revelen cada
+vez más posiciones. La clave deberá ser larga y aleatoria, y tendrá un umbral
+de rotación por número de autorizaciones o cobertura de posiciones.
+
+### Plan por fases
+
+#### Fase 0 — ADR, amenazas y contrato
+
+- [ ] `SCHEDPK-00` Redactar un ADR que fije nombre, alcance y separación de los
+  módulos existentes.
+- [ ] `SCHEDPK-01` Definir activos, actores, fronteras de confianza y amenazas:
+  observación, replay, fuerza bruta, robo de archivos, concurrencia y DoS.
+- [ ] `SCHEDPK-02` Fijar semántica exacta de `auth`, `account`,
+  `default=ignore|deny` y cuentas no gestionadas.
+- [ ] `SCHEDPK-03` Definir límites de longitud, número de reglas,
+  autorizadores, tamaños de archivos y vida de la marca PAM.
+- [ ] `SCHEDPK-04` Documentar que la clave parcial no es OTP, no identifica al
+  alumno y se degrada con observaciones acumuladas.
+
+**Criterio de salida:** ADR aprobado, formatos versionados y casos de abuso
+enumerados antes de escribir el módulo.
+
+#### Fase 1 — Componentes comunes sin regresiones
+
+- [ ] `SCHEDPK-10` Extraer el parser/evaluador horario a una biblioteca interna
+  con API pequeña y sin estado global mutable nuevo.
+- [ ] `SCHEDPK-11` Extraer hashing, parsing y comparación de clave parcial a
+  primitivas independientes de PAM y del sistema de archivos.
+- [ ] `SCHEDPK-12` Mantener adaptadores compatibles para que los dos módulos
+  existentes conserven exactamente su comportamiento.
+- [ ] `SCHEDPK-13` Añadir pruebas de regresión antes y después de la extracción.
+
+**Criterio de salida:** `pam_schedule_totp_override` y `pam_partial_key` pasan
+sus puertas actuales sin cambios observables.
+
+#### Fase 2 — Formatos seguros y enrolamiento docente
+
+- [ ] `SCHEDPK-20` Implementar parser cerrado y versionado de configuración.
+- [ ] `SCHEDPK-21` Implementar lectura segura mediante `openat`, `O_NOFOLLOW`,
+  `fstat`, propietario, modo, tipo, tamaño y número de enlaces.
+- [ ] `SCHEDPK-22` Crear `schedule_partial_key_manager` para alta, rotación,
+  inspección de metadatos y revocación explícita.
+- [ ] `SCHEDPK-23` Leer la clave desde TTY o entrada estándar protegida, nunca
+  desde `argv`, entorno o logs.
+- [ ] `SCHEDPK-24` Instalar archivos mediante temporal privado, `fsync`,
+  `renameat` y sincronización del directorio.
+- [ ] `SCHEDPK-25` Limpiar clave completa, caracteres parciales, hashes y sales
+  temporales de memoria.
+
+**Criterio de salida:** enrolamiento y rotación son atómicos; archivos ausentes,
+corruptos o inseguros fallan de forma cerrada.
+
+#### Fase 3 — Autenticación combinada y estado
+
+- [ ] `SCHEDPK-30` Implementar la bifurcación dentro/fuera de horario.
+- [ ] `SCHEDPK-31` Generar tres posiciones distintas y ordenadas mediante
+  muestreo uniforme sin sesgo.
+- [ ] `SCHEDPK-32` Validar respuesta de longitud exacta y comparar todos los
+  hashes sin salida temprana dependiente del carácter.
+- [ ] `SCHEDPK-33` Implementar rate limiting por usuario, servicio y autorizador
+  usando reloj monotónico.
+- [ ] `SCHEDPK-34` Implementar consumo persistente y concurrente de tríos.
+- [ ] `SCHEDPK-35` Implementar la marca efímera `auth`→`account`, ligada al
+  contexto PAM y con expiración corta.
+- [ ] `SCHEDPK-36` Auditar aceptación, rechazo, bloqueo, rotación y errores de
+  estado sin datos sensibles.
+- [ ] `SCHEDPK-37` Denegar ante errores de reloj, aleatoriedad, memoria, estado,
+  configuración o conversación PAM.
+
+**Criterio de salida:** el flujo completo funciona en un servicio PAM aislado y
+ningún fallo interno concede acceso.
+
+#### Fase 4 — Verificación exhaustiva
+
+- [ ] `SCHEDPK-40` Probar fronteras horarias, listas de días, medianoche, DST y
+  reloj adelantado/atrasado.
+- [ ] `SCHEDPK-41` Probar claves de 8 y 64 posiciones, caracteres especiales,
+  respuestas cortas/largas y posiciones repetidas.
+- [ ] `SCHEDPK-42` Probar archivos ausentes, truncados, enormes, multilínea,
+  symlinks, hard links, FIFO, propietario y permisos incorrectos.
+- [ ] `SCHEDPK-43` Probar contraseña incorrecta: nunca debe solicitarse ni
+  consumirse un desafío docente.
+- [ ] `SCHEDPK-44` Probar que un trío aceptado no vuelve a emitirse con la misma
+  identidad de clave.
+- [ ] `SCHEDPK-45` Probar carreras entre procesos: un mismo desafío no puede
+  aceptarse dos veces ni perder actualizaciones.
+- [ ] `SCHEDPK-46` Probar rate limiting, expiración de marca PAM, cuentas no
+  gestionadas y aislamiento entre servicios/autorizadores.
+- [ ] `SCHEDPK-47` Añadir fuzzing de configuración, archivo posicional y estado
+  persistente.
+- [ ] `SCHEDPK-48` Pasar GCC, Clang, análisis estático, ASan, UBSan, Valgrind,
+  pruebas ELF y `git diff --check`.
+
+**Criterio de salida:** todas las pruebas positivas, negativas, de permisos,
+replay y concurrencia pasan de forma reproducible.
+
+#### Fase 5 — Documentación, empaquetado y recuperación
+
+- [ ] `SCHEDPK-50` Escribir README con modelo de amenazas, límites, ejemplos de
+  stack PAM y advertencia sobre claves compartidas.
+- [ ] `SCHEDPK-51` Documentar instalación primero en un servicio aislado y
+  prohibir la modificación automática de `common-auth`.
+- [ ] `SCHEDPK-52` Documentar backup, rollback, revocación, rotación, limpieza
+  del estado y recuperación mediante consola o sesión administrativa abierta.
+- [ ] `SCHEDPK-53` Añadir `make test`, `make verify`, `make install` y
+  `make uninstall`; la desinstalación no borrará claves sin una orden separada.
+- [ ] `SCHEDPK-54` Añadir el módulo a la tabla y verificación general del
+  repositorio solo después de superar su puerta específica.
+
+**Criterio de salida:** un administrador puede instalar, probar, revertir,
+rotar y desinstalar sin depender de conocimiento implícito.
+
+#### Fase 6 — Piloto controlado
+
+- [ ] `SCHEDPK-60` Desplegar primero en un servicio PAM de laboratorio y una
+  cuenta no crítica.
+- [ ] `SCHEDPK-61` Validar acceso dentro de horario, excepción fuera de horario,
+  rechazo, bloqueo, rotación y recuperación.
+- [ ] `SCHEDPK-62` Medir cuántas posiciones quedan expuestas por autorizador y
+  definir un umbral operativo de rotación.
+- [ ] `SCHEDPK-63` Activar en SSH u otro servicio real solo con consola o sesión
+  de respaldo y rollback ya ensayado.
+
+**Criterio de salida:** piloto documentado, rollback probado y riesgo residual
+aceptado explícitamente antes del despliegue amplio.
+
+### Pruebas de aceptación
+
+- [ ] Dentro del horario, una contraseña correcta permite acceso sin desafío.
+- [ ] Fuera del horario, la contraseña por sí sola no permite acceso.
+- [ ] Fuera del horario, las tres posiciones correctas autorizan la cuenta.
+- [ ] Una contraseña incorrecta nunca muestra el desafío docente.
+- [ ] La clave de un autorizador no funciona para una regla asociada a otro.
+- [ ] Una respuesta correcta para otro trío u orden es rechazada.
+- [ ] Un trío consumido no vuelve a emitirse mientras la clave siga vigente.
+- [ ] Dos procesos concurrentes no pueden consumir el mismo desafío.
+- [ ] Reiniciar no reactiva los tríos persistentes ya consumidos.
+- [ ] Rotar la clave invalida inmediatamente respuestas y estado anteriores.
+- [ ] Configuración, clave o estado ausente/corrupto/inseguro deniegan acceso.
+- [ ] El rate limiting no puede omitirse cambiando el reloj de pared.
+- [ ] `account` deniega una excepción sin una marca válida de `auth`.
+- [ ] Los logs permiten auditar el evento sin revelar posiciones ni respuestas.
+
+### Riesgos y límites
+
+- La clave parcial es un factor de conocimiento, no una prueba de posesión.
+- La observación de suficientes desafíos y respuestas permite reconstruir la
+  clave completa; el registro de tríos consumidos no evita esa acumulación.
+- Un autorizador compartido amplía el impacto de una filtración a todas las
+  cuentas que lo referencian.
+- Una clave corta o predecible facilita ataques offline por posición si se roba
+  el archivo de hashes.
+- Un alumno puede reenviar un desafío al profesor en tiempo real; el mecanismo
+  no demuestra presencia física ni evita relay/phishing.
+- El compromiso de `root`, del proceso PAM o del terminal del profesor permite
+  capturar respuestas o alterar la política.
+- La política se evalúa al autenticar y no termina sesiones ya abiertas.
+
+### Valor de seguridad
+
+Alto como control horario con autorización docente local y sin dispositivo
+TOTP. Inferior al TOTP para resistencia a replay, observación acumulada y
+phishing. Debe ofrecerse como una variante pedagógica o de contingencia, no
+como sustituto criptográficamente equivalente de
+`pam_schedule_totp_override`.
+
 ---
 
 ## Ideas descartadas inicialmente
@@ -936,6 +1222,7 @@ Evaluar por separado:
 2. `pam_totp_ticket`
 3. `pam_totp_duress`
 4. `pam_schedule_totp_override`
+5. `pam_schedule_partial_key_override`
 
 #### Criterio de salida
 
@@ -1015,6 +1302,9 @@ pam_totp_duress
 
 pam_schedule_totp_override
     └── excepción horaria autorizada por profesor
+
+pam_schedule_partial_key_override
+    └── excepción horaria mediante clave parcial docente
 ```
 
 Cada módulo debe continuar siendo pequeño, local, compilable y comprensible sin depender de una arquitectura externa.

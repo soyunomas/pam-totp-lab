@@ -7,7 +7,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -38,31 +37,6 @@ static void secure_zero(void *value, size_t length)
         *bytes++ = 0U;
         length--;
     }
-}
-
-static int generate_position_hash(unsigned char output[PK_HASH_LEN],
-                                  const unsigned char salt[PK_SALT_LEN],
-                                  int index, char character)
-{
-    EVP_MD_CTX *context = EVP_MD_CTX_new();
-    unsigned int digest_length = 0U;
-    int result = -1;
-
-    memset(output, 0, PK_HASH_LEN);
-    if (context == NULL) return -1;
-
-    if (EVP_DigestInit_ex(context, EVP_sha256(), NULL) == 1 &&
-        EVP_DigestUpdate(context, salt, PK_SALT_LEN) == 1 &&
-        EVP_DigestUpdate(context, &index, sizeof(index)) == 1 &&
-        EVP_DigestUpdate(context, &character, 1U) == 1 &&
-        EVP_DigestFinal_ex(context, output, &digest_length) == 1 &&
-        digest_length == PK_HASH_LEN) {
-        result = 0;
-    }
-
-    EVP_MD_CTX_free(context);
-    if (result != 0) secure_zero(output, PK_HASH_LEN);
-    return result;
 }
 
 static int append_format(char *buffer, size_t capacity, size_t *used,
@@ -112,7 +86,7 @@ static int serialize_key_file(const char *password, size_t password_length,
     }
 
     for (size_t i = 0U; i < password_length; i++) {
-        if (generate_position_hash(hash, salt, (int)i, password[i]) != 0 ||
+        if (pk_hash_position(hash, salt, (int)i, password[i]) != 0 ||
             append_hex(output, PK_MAX_FILE_SIZE + 1U, &used, hash,
                        PK_HASH_LEN) != 0 ||
             (i + 1U < password_length &&

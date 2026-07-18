@@ -36,7 +36,10 @@ struct pso_config {
 void pso_secure_memzero(void *buffer, size_t length);
 int pso_validate_username(const char *username);
 int pso_validate_secret_name(const char *name);
+int pso_validate_authorizer_name(const char *name);
 int pso_parse_config(const char *text, size_t length, struct pso_config *out);
+int pso_parse_authorizer_config(const char *text, size_t length,
+                                struct pso_config *out);
 int pso_evaluate_schedule(const struct pso_config *config, const char *username,
                           const struct tm *local_time,
                           const struct pso_rule **rule_out);

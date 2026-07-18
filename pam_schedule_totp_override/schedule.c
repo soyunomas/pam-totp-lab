@@ -77,6 +77,28 @@ int pso_validate_secret_name(const char *name)
     return 0;
 }
 
+int pso_validate_authorizer_name(const char *name)
+{
+    size_t length;
+
+    if (name == NULL) return -1;
+    length = strnlen(name, PSO_MAX_SECRET_NAME_LEN + 1U);
+    if (length == 0U || length > 48U || name[0] == '.' ||
+        strstr(name, "..") != NULL) {
+        return -1;
+    }
+    for (size_t i = 0U; i < length; i++) {
+        unsigned char ch = (unsigned char)name[i];
+        if (!((ch >= (unsigned char)'A' && ch <= (unsigned char)'Z') ||
+              (ch >= (unsigned char)'a' && ch <= (unsigned char)'z') ||
+              (ch >= (unsigned char)'0' && ch <= (unsigned char)'9') ||
+              ch == (unsigned char)'_' || ch == (unsigned char)'-')) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int day_index(const char *token)
 {
     static const char *const days[] = {"Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"};
@@ -167,12 +189,12 @@ static int parse_time_range(const char *text, uint16_t *start_out,
     return 0;
 }
 
-static int parse_rule_line(const char *line, struct pso_rule *rule)
+static int parse_rule_line(const char *line, const char *credential_marker,
+                           int authorizer_mode, struct pso_rule *rule)
 {
     static const char user_prefix[] = "user=";
     static const char days_marker[] = ";days=";
     static const char time_marker[] = ";time=";
-    static const char secret_marker[] = ";secret=";
     const char *days;
     const char *time_range;
     const char *secret;
@@ -188,7 +210,7 @@ static int parse_rule_line(const char *line, struct pso_rule *rule)
     if (days == NULL) return -1;
     time_range = strstr(days + sizeof(days_marker) - 1U, time_marker);
     if (time_range == NULL) return -1;
-    secret = strstr(time_range + sizeof(time_marker) - 1U, secret_marker);
+    secret = strstr(time_range + sizeof(time_marker) - 1U, credential_marker);
     if (secret == NULL) return -1;
 
     user_length = (size_t)(days - (line + sizeof(user_prefix) - 1U));
@@ -196,7 +218,7 @@ static int parse_rule_line(const char *line, struct pso_rule *rule)
     days_length = (size_t)(time_range - days);
     time_range += sizeof(time_marker) - 1U;
     time_length = (size_t)(secret - time_range);
-    secret += sizeof(secret_marker) - 1U;
+    secret += strlen(credential_marker);
 
     memset(rule, 0, sizeof(*rule));
     if (copy_bounded(rule->user, sizeof(rule->user),
@@ -204,7 +226,9 @@ static int parse_rule_line(const char *line, struct pso_rule *rule)
         copy_bounded(rule->secret_name, sizeof(rule->secret_name), secret,
                      strlen(secret)) != 0 ||
         pso_validate_username(rule->user) != 0 ||
-        pso_validate_secret_name(rule->secret_name) != 0) {
+        (authorizer_mode != 0
+             ? pso_validate_authorizer_name(rule->secret_name)
+             : pso_validate_secret_name(rule->secret_name)) != 0) {
         return -1;
     }
 
@@ -226,7 +250,8 @@ static int parse_rule_line(const char *line, struct pso_rule *rule)
     return 0;
 }
 
-int pso_parse_config(const char *text, size_t length, struct pso_config *out)
+static int parse_config(const char *text, size_t length, struct pso_config *out,
+                        const char *credential_marker, int authorizer_mode)
 {
     char *copy = NULL;
     char *line;
@@ -271,12 +296,15 @@ int pso_parse_config(const char *text, size_t length, struct pso_config *out)
             struct pso_rule rule;
             if (version_seen == 0 || default_seen == 0 ||
                 out->rule_count >= PSO_MAX_RULES ||
-                parse_rule_line(line, &rule) != 0) {
+                parse_rule_line(line, credential_marker, authorizer_mode,
+                                &rule) != 0) {
                 goto cleanup;
             }
             for (size_t i = 0U; i < out->rule_count; i++) {
                 if (strcmp(out->rules[i].user, rule.user) == 0 ||
-                    strcmp(out->rules[i].secret_name, rule.secret_name) == 0) {
+                    (authorizer_mode == 0 &&
+                     strcmp(out->rules[i].secret_name,
+                            rule.secret_name) == 0)) {
                     pso_secure_memzero(&rule, sizeof(rule));
                     goto cleanup;
                 }
@@ -297,6 +325,17 @@ cleanup:
     pso_secure_memzero(copy, length + 1U);
     free(copy);
     return result;
+}
+
+int pso_parse_config(const char *text, size_t length, struct pso_config *out)
+{
+    return parse_config(text, length, out, ";secret=", 0);
+}
+
+int pso_parse_authorizer_config(const char *text, size_t length,
+                                struct pso_config *out)
+{
+    return parse_config(text, length, out, ";authorizer=", 1);
 }
 
 int pso_evaluate_schedule(const struct pso_config *config, const char *username,

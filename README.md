@@ -6,7 +6,7 @@ Colección experimental y educativa de módulos **PAM (Pluggable Authentication 
 
 ## Resumen de implementaciones
 
-El repositorio contiene diez implementaciones. Todas disponen de un directorio propio y documentación específica.
+El repositorio contiene once implementaciones. Todas disponen de un directorio propio y documentación específica.
 
 | Implementación | Descripción breve | Documentación |
 | :--- | :--- | :--- |
@@ -20,6 +20,7 @@ El repositorio contiene diez implementaciones. Todas disponen de un directorio p
 | `pam_school_schedule` | Autoriza el acceso según una agenda y la hora local. | [README](./pam_school_schedule/README.md) |
 | `pam_2man_totp` | Exige la autenticación secuencial de dos usuarios. | [README](./pam_2man_totp/README.md) |
 | `pam_schedule_totp_override` | Permite una excepción TOTP docente fuera del horario asignado. | [README](./pam_schedule_totp_override/README.md) |
+| `pam_schedule_partial_key_override` | Permite una excepción horaria mediante posiciones de una clave docente. | [README](./pam_schedule_partial_key_override/README.md) |
 
 ## 📂 Implementaciones
 
@@ -111,6 +112,16 @@ Aplica un horario por cuenta y exige un TOTP docente específico fuera de la fra
 - No resuelve la falta de atribución causada por contraseñas compartidas.
 - [Documentación](./pam_schedule_totp_override/README.md)
 
+### 11. `pam_schedule_partial_key_override`
+
+Aplica un horario por cuenta y solicita tres posiciones de una clave docente fuera de la franja ordinaria.
+
+- Configuración, claves y estado persistente protegidos por `root`.
+- Los tríos ordenados aceptados no vuelven a emitirse con la misma clave.
+- Rate limiting concurrente y marca acotada entre las fases `auth` y `account`.
+- No es OTP ni evita la reconstrucción gradual de la clave por observación.
+- [Documentación](./pam_schedule_partial_key_override/README.md)
+
 ## ⚡ Comparativa rápida
 
 | Módulo | Tecnología | Interacción | Mitigación o experimento principal |
@@ -125,6 +136,7 @@ Aplica un horario por cuenta y exige un TOTP docente específico fuera de la fra
 | `pam_school_schedule` | Agenda y reloj | Prompt contextual | Acceso fuera de horario |
 | `pam_2man_totp` | TOTP dual | Cuatro pasos | Amenaza interna individual |
 | `pam_schedule_totp_override` | Horario + TOTP | Prompt solo fuera de horario | Excepciones docentes supervisadas |
+| `pam_schedule_partial_key_override` | Horario + hash posicional | Tres posiciones fuera de horario | Autorización docente sin TOTP |
 
 ## 🛠️ Requisitos generales
 
@@ -148,6 +160,7 @@ make -C pam_totp_domains verify
 make -C pam_totp_shuffle verify
 make -C pam_totp_slot_challenge verify
 make -C pam_schedule_totp_override verify
+make -C pam_schedule_partial_key_override verify
 ```
 
 ## Advertencia de despliegue
