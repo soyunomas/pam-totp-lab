@@ -35,6 +35,20 @@ static int write_file_at(int dirfd, const char *name, const char *content,
     return close(fd);
 }
 
+static void remove_at_best_effort(int dirfd, const char *name, int flags)
+{
+    if (unlinkat(dirfd, name, flags) != 0) {
+        /* Test cleanup is best-effort and must not hide the test result. */
+    }
+}
+
+static void remove_directory_best_effort(const char *path)
+{
+    if (rmdir(path) != 0) {
+        /* Test cleanup is best-effort and must not hide the test result. */
+    }
+}
+
 int main(void)
 {
     char template[] = "/tmp/pam-totp-domains-XXXXXX";
@@ -112,13 +126,19 @@ int main(void)
           "same counter accepted in independent sudo domain");
 
 cleanup:
-    if (domain_fd >= 0) close(domain_fd);
-    if (home_fd >= 0) close(home_fd);
-    if (root != NULL) {
-        char command[512];
-        int length = snprintf(command, sizeof(command), "rm -rf -- '%s'", root);
-        if (length > 0 && (size_t)length < sizeof(command)) (void)system(command);
+    if (domain_fd >= 0) {
+        if (ssh != NULL) remove_at_best_effort(domain_fd, ssh->secret_file, 0);
+        close(domain_fd);
     }
+    if (home_fd >= 0) {
+        remove_at_best_effort(home_fd, "ptd_sshd-1001.lock", 0);
+        remove_at_best_effort(home_fd, "ptd_sshd-1001.counter", 0);
+        remove_at_best_effort(home_fd, "ptd_sudo-1001.lock", 0);
+        remove_at_best_effort(home_fd, "ptd_sudo-1001.counter", 0);
+        remove_at_best_effort(home_fd, PTD_SECRET_DIRECTORY, AT_REMOVEDIR);
+        close(home_fd);
+    }
+    if (root != NULL) remove_directory_best_effort(root);
     if (failures != 0) return EXIT_FAILURE;
     puts("pam_totp_domains tests passed");
     return EXIT_SUCCESS;
