@@ -117,6 +117,11 @@ jobs:
             fi
           done
 
+      - name: Remove generated verification artifacts
+        run: |
+          rm -rf pam_totp_domains/build pam_totp_shuffle/build
+          rm -f pam_totp_shuffle/*.plist
+
       - name: Commit integrated modules
         run: |
           if git diff --quiet && git diff --cached --quiet; then
