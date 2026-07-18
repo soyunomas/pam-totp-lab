@@ -19,7 +19,7 @@ El inventario actual contiene diez implementaciones. Todas disponen de un direct
 | `pam_partial_key` | Integrada en `main` | [README](./pam_partial_key/README.md) |
 | `pam_school_schedule` | Integrada en `main` | [README](./pam_school_schedule/README.md) |
 | `pam_2man_totp` | Integrada en `main` | [README](./pam_2man_totp/README.md) |
-| `pam_schedule_totp_override` | Implementada en rama | [README](./pam_schedule_totp_override/README.md) |
+| `pam_schedule_totp_override` | Integrada en `main` | [README](./pam_schedule_totp_override/README.md) |
 
 ## 📂 Implementaciones
 
