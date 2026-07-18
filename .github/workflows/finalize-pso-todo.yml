@@ -1,0 +1,41 @@
+name: Finalize schedule override TODO
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    if: >-
+      github.actor == 'soyunomas' &&
+      github.head_ref == 'feature/pam-schedule-totp-override' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/pam-schedule-totp-override
+          fetch-depth: 0
+
+      - name: Apply deterministic TODO patch
+        run: python .github/scripts/finalize_pso_todo.py
+
+      - name: Commit TODO update
+        run: |
+          if git diff --quiet -- TODO_AUTHENTICATION_IDEAS.md; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add TODO_AUTHENTICATION_IDEAS.md
+          git commit -m "Documentar implementación de pam_schedule_totp_override"
+          git push origin HEAD:feature/pam-schedule-totp-override
