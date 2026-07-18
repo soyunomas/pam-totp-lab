@@ -98,6 +98,15 @@ int main(void)
               "duplicate user rejected");
     }
     {
+        static const char duplicate_secret[] =
+            "version=1\ndefault=deny\n"
+            "user=A;days=Mo;time=0800-1400;secret=shared.secret\n"
+            "user=B;days=Tu;time=0800-1400;secret=shared.secret\n";
+        check(pso_parse_config(duplicate_secret, sizeof(duplicate_secret) - 1U,
+                               &config) != 0,
+              "secret reuse across accounts rejected");
+    }
+    {
         static const char invalid_day[] =
             "version=1\ndefault=deny\n"
             "user=A;days=Fr-Mo;time=0800-1400;secret=A.secret\n";

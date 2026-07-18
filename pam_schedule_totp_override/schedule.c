@@ -275,7 +275,8 @@ int pso_parse_config(const char *text, size_t length, struct pso_config *out)
                 goto cleanup;
             }
             for (size_t i = 0U; i < out->rule_count; i++) {
-                if (strcmp(out->rules[i].user, rule.user) == 0) {
+                if (strcmp(out->rules[i].user, rule.user) == 0 ||
+                    strcmp(out->rules[i].secret_name, rule.secret_name) == 0) {
                     pso_secure_memzero(&rule, sizeof(rule));
                     goto cleanup;
                 }
