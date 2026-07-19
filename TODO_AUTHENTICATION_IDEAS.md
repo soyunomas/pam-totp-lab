@@ -53,26 +53,51 @@ Se permite una herramienta de configuración o enrolamiento ejecutada manualment
 - [ ] Ningún módulo se instalará automáticamente en `common-auth`.
 - [ ] Cada README incluirá procedimiento de recuperación y desinstalación.
 
+## Estado del repositorio
+
+Esta tabla distingue las ideas todavía pendientes de las implementaciones que
+ya tienen código y documentación en `main`. Una implementación puede conservar
+tareas opcionales abiertas sin que eso signifique que el módulo no exista.
+
+| Proyecto | Estado | Trabajo abierto principal |
+| --- | --- | --- |
+| `pam_totp_domains` | Implementado | Enrolamiento con QR y migración asistida |
+| `pam_totp_epoch_guard` | Pendiente | Diseño e implementación |
+| `pam_totp_quorum` | Pendiente | Diseño e implementación |
+| `pam_totp_slot_challenge` | Implementado | Sin desafíos múltiples; pertenecen a `quorum` |
+| `pam_totp_rollover` | Implementado | Pruebas negativas de piloto y rollback ampliados |
+| `pam_totp_sealed_seed` | Pendiente | Diseño criptográfico e implementación |
+| `pam_totp_ladder` | Pendiente | Depende de `pam_totp_rollover` |
+| `pam_totp_shuffle` | Implementado | Variante accesible opcional |
+| `pam_totp_ticket` | Pendiente | Diseño e implementación |
+| `pam_totp_duress` | Pendiente | Análisis de riesgo e implementación |
+| `pam_schedule_totp_override` | Implementado | Piloto y mantenimiento operativo |
+| `pam_schedule_partial_key_override` | Implementación inicial | Fuzzing, concurrencia ampliada y piloto |
+
 ## Prioridad recomendada
 
-| Orden | Proyecto | Valor | Complejidad | Aplicación TOTP estándar |
-| ---: | --- | --- | --- | --- |
-| 1 | `pam_totp_domains` | Muy alto | Baja | Sí |
-| 2 | `pam_totp_epoch_guard` | Muy alto | Media | Sí |
-| 3 | `pam_totp_quorum` | Alto | Media | Sí |
-| 4 | `pam_totp_slot_challenge` | Alto | Media | Sí |
-| 5 | `pam_totp_rollover` | Alto | Media | Sí |
-| 6 | `pam_totp_sealed_seed` | Alto | Alta | Sí |
-| 7 | `pam_totp_ladder` | Medio-alto | Media | Sí |
-| 8 | `pam_totp_shuffle` | Experimental | Baja | Sí |
-| 9 | `pam_totp_ticket` | Experimental | Alta | Sí |
-| 10 | `pam_totp_duress` | Investigación | Media | Sí |
-| 11 | `pam_schedule_totp_override` | Alto | Baja-media | Sí |
-| 12 | `pam_schedule_partial_key_override` | Alto | Media-alta | No |
+| Orden | Proyecto | Valor | Complejidad | TOTP estándar | Estado |
+| ---: | --- | --- | --- | --- | --- |
+| 1 | `pam_totp_domains` | Muy alto | Baja | Sí | Implementado |
+| 2 | `pam_totp_epoch_guard` | Muy alto | Media | Sí | Pendiente |
+| 3 | `pam_totp_quorum` | Alto | Media | Sí | Pendiente |
+| 4 | `pam_totp_slot_challenge` | Alto | Media | Sí | Implementado |
+| 5 | `pam_totp_rollover` | Alto | Media | Sí | Implementado |
+| 6 | `pam_totp_sealed_seed` | Alto | Alta | Sí | Pendiente |
+| 7 | `pam_totp_ladder` | Medio-alto | Media | Sí | Pendiente |
+| 8 | `pam_totp_shuffle` | Experimental | Baja | Sí | Implementado |
+| 9 | `pam_totp_ticket` | Experimental | Alta | Sí | Pendiente |
+| 10 | `pam_totp_duress` | Investigación | Media | Sí | Pendiente |
+| 11 | `pam_schedule_totp_override` | Alto | Baja-media | Sí | Implementado |
+| 12 | `pam_schedule_partial_key_override` | Alto | Media-alta | No | Inicial |
 
 ---
 
 ## 1. `pam_totp_domains`: secretos separados por servicio
+
+> **Estado:** implementado en `pam_totp_domains/`. El núcleo, el aislamiento
+> por servicio, el antirreplay y las pruebas están disponibles. El generador de
+> QR y la migración automática continúan como mejoras opcionales.
 
 ### Idea
 
@@ -121,22 +146,22 @@ También podría utilizarse un único archivo estructurado con límites estricto
 
 ### Desarrollo
 
-- [ ] `DOMAIN-01` Obtener el servicio exclusivamente mediante `PAM_SERVICE`.
-- [ ] `DOMAIN-02` Definir una lista permitida de nombres de servicio.
-- [ ] `DOMAIN-03` Rechazar rutas, separadores y nombres desconocidos.
-- [ ] `DOMAIN-04` Implementar secretos independientes por servicio.
-- [ ] `DOMAIN-05` Permitir una política explícita para servicios sin secreto.
-- [ ] `DOMAIN-06` Implementar estado antirreplay separado por usuario y servicio.
+- [x] `DOMAIN-01` Obtener el servicio exclusivamente mediante `PAM_SERVICE`.
+- [x] `DOMAIN-02` Definir una lista permitida de nombres de servicio.
+- [x] `DOMAIN-03` Rechazar rutas, separadores y nombres desconocidos.
+- [x] `DOMAIN-04` Implementar secretos independientes por servicio.
+- [x] `DOMAIN-05` Permitir una política explícita para servicios sin secreto.
+- [x] `DOMAIN-06` Implementar estado antirreplay separado por usuario y servicio.
 - [ ] `DOMAIN-07` Crear una herramienta de enrolamiento que genere los QR.
 - [ ] `DOMAIN-08` Añadir migración desde un único secreto TOTP.
 
 ### Pruebas de aceptación
 
-- [ ] El código de SSH nunca funciona para `sudo`.
-- [ ] Un nombre de servicio manipulado no permite leer otro archivo.
-- [ ] El antirreplay de un servicio no bloquea códigos legítimos de otro.
-- [ ] Un servicio desconocido se rechaza salvo configuración explícita.
-- [ ] Los prompts muestran claramente el dominio solicitado.
+- [x] El código de SSH nunca funciona para `sudo`.
+- [x] Un nombre de servicio manipulado no permite leer otro archivo.
+- [x] El antirreplay de un servicio no bloquea códigos legítimos de otro.
+- [x] Un servicio desconocido se rechaza salvo configuración explícita.
+- [x] Los prompts muestran claramente el dominio solicitado.
 
 ### Valor de seguridad
 
@@ -268,6 +293,11 @@ Alto cuando los secretos están realmente separados. Bajo si todos están guarda
 
 ## 4. `pam_totp_slot_challenge`: selección aleatoria de credencial
 
+> **Estado:** implementado en `pam_totp_slot_challenge/` con 2–4 slots cerrados
+> (`A`–`D`), selección uniforme, antirreplay por slot y pruebas específicas. La
+> opción histórica `challenge_count=2` se descarta aquí: los desafíos múltiples
+> corresponden a `pam_totp_quorum`.
+
 ### Idea
 
 El usuario registra varios secretos TOTP identificados como slots:
@@ -294,22 +324,23 @@ Es menos fuerte que un quorum, pero más cómodo.
 
 ### Desarrollo
 
-- [ ] `SLOT-01` Permitir entre dos y ocho slots.
-- [ ] `SLOT-02` Seleccionar el slot mediante aleatoriedad criptográfica.
-- [ ] `SLOT-03` Evitar sesgos mediante selección uniforme.
-- [ ] `SLOT-04` No permitir que el cliente elija el slot.
-- [ ] `SLOT-05` Mantener antirreplay independiente para cada secreto.
-- [ ] `SLOT-06` Permitir nombres cortos que no revelen el dispositivo.
-- [ ] `SLOT-07` Implementar una opción `challenge_count=2`.
-- [ ] `SLOT-08` Añadir estadísticas de prueba para verificar la distribución.
+- [x] `SLOT-01` Permitir entre dos y cuatro slots con nombres cerrados.
+- [x] `SLOT-02` Seleccionar el slot mediante aleatoriedad criptográfica.
+- [x] `SLOT-03` Evitar sesgos mediante selección uniforme.
+- [x] `SLOT-04` No permitir que el cliente elija el slot.
+- [x] `SLOT-05` Mantener antirreplay independiente para cada secreto.
+- [x] `SLOT-06` Usar nombres cortos que no revelen el dispositivo.
+- [x] `SLOT-07` Mantener un desafío por autenticación y delegar el quorum al
+  módulo específico.
+- [x] `SLOT-08` Añadir pruebas repetidas para verificar la distribución.
 
 ### Pruebas de aceptación
 
-- [ ] Los slots aparecen con una distribución aproximadamente uniforme.
-- [ ] El código de otro slot no es aceptado.
-- [ ] El usuario no puede forzar repetidamente su slot preferido.
-- [ ] Un fallo no provoca automáticamente la selección de un slot más débil.
-- [ ] El mismo contador no puede consumirse dos veces en un slot.
+- [x] Los slots aparecen con una distribución aproximadamente uniforme.
+- [x] El código de otro slot no es aceptado.
+- [x] El usuario no puede forzar repetidamente su slot preferido.
+- [x] Un fallo no provoca automáticamente la selección de un slot más débil.
+- [x] El mismo contador no puede consumirse dos veces en un slot.
 
 ### Limitación
 
@@ -318,6 +349,13 @@ Con un secreto comprometido y cuatro slots, el atacante tendría aproximadamente
 No sustituye a un verdadero segundo factor independiente.
 
 ## 5. `pam_totp_rollover`: doble código consecutivo
+
+> **Estado:** implementado en `pam_totp_rollover/`, con
+> pruebas de núcleo, secreto, ámbito, integración PAM y estado concurrente. La
+> puerta `make verify` pasa con GCC, Clang, análisis estático, ASan, UBSan,
+> Valgrind y hardening ELF. El flujo completo también se validó en un piloto
+> SSH con una cuenta no crítica y una sesión administrativa de recuperación.
+> Queda ampliar en el piloto los casos negativos, la concurrencia y el rollback.
 
 ### Idea
 
@@ -348,22 +386,157 @@ Siguiente código en aproximadamente 8 segundos.
 
 ### Desarrollo
 
-- [ ] `ROLLOVER-01` Registrar el contador del primer código aceptado.
-- [ ] `ROLLOVER-02` Exigir exactamente el contador siguiente.
-- [ ] `ROLLOVER-03` Establecer un timeout total estricto.
-- [ ] `ROLLOVER-04` No aceptar dos códigos del mismo periodo.
-- [ ] `ROLLOVER-05` No aceptar un código anterior como segundo paso.
-- [ ] `ROLLOVER-06` Consumir ambos contadores de forma segura.
+- [x] `ROLLOVER-01` Registrar el contador del primer código aceptado.
+- [x] `ROLLOVER-02` Exigir exactamente el contador siguiente.
+- [x] `ROLLOVER-03` Establecer un deadline monotónico para el segundo código y
+  documentar que el consumidor PAM controla el timeout de una conversación
+  bloqueada.
+- [x] `ROLLOVER-04` No aceptar dos códigos del mismo periodo.
+- [x] `ROLLOVER-05` No aceptar un código anterior como segundo paso.
+- [x] `ROLLOVER-06` Consumir ambos contadores de forma segura.
 - [ ] `ROLLOVER-07` Añadir un modo que espere antes del primer prompt cuando el periodo acaba de comenzar.
-- [ ] `ROLLOVER-08` Documentar el impacto de hasta treinta segundos adicionales.
+- [x] `ROLLOVER-08` Documentar una espera inferior a 30 segundos más el tiempo
+  acotado para responder al segundo prompt.
+
+### Decisiones para la primera versión
+
+- Crear un módulo independiente en `pam_totp_rollover/`; no convertir
+  `pam_strict_totp` en un módulo con modos incompatibles.
+- Reutilizar las primitivas comunes de lectura segura, TOTP y antirreplay. No
+  enlazar ni invocar otro módulo PAM desde el nuevo módulo.
+- Aceptar como primer paso un código asociado a un contador concreto y exigir
+  como segundo paso exclusivamente `primer_contador + 1`.
+- Consumir el primer contador antes de solicitar el segundo. Un
+  fallo, cancelación o timeout no deshará ese consumo: la seguridad prima sobre
+  permitir un reintento con el mismo código.
+- Mantener un bloqueo exclusivo por UID, servicio e identidad del secreto desde
+  antes de consumir el primer contador hasta terminar el segundo paso. El
+  bloqueo se libera automáticamente si el proceso muere; el primer contador ya
+  persistido continúa consumido.
+- Medir el timeout con `CLOCK_MONOTONIC`; utilizar el reloj de pared únicamente
+  para calcular contadores TOTP. Un salto de reloj incoherente producirá
+  denegación, nunca una relajación de la secuencia.
+- No mantener un `sleep()` ciego dentro de la lógica. La espera tendrá una
+  abstracción de reloj interrumpible e inyectable para que las pruebas no duren
+  periodos TOTP reales.
+- Mantener seis dígitos, SHA-1 y periodos de 30 segundos compatibles con
+  aplicaciones TOTP estándar durante la primera versión.
+- Fallar de forma cerrada ante errores de conversación, reloj, estado,
+  permisos, memoria o generación/validación TOTP.
+
+### Plan por fases
+
+#### Fase 0 — Contrato y amenazas
+
+- [x] `ROLLOVER-P00` Definir el contrato exacto de los dos prompts, códigos de
+  retorno PAM, cuentas no enroladas y argumentos admitidos.
+- [x] `ROLLOVER-P01` Modelar captura aislada, phishing en tiempo real, replay,
+  carreras, cancelación, timeout, saltos de reloj y denegación de servicio.
+- [x] `ROLLOVER-P02` Fijar el límite total de espera y el comportamiento cuando
+  el primer código se introduce cerca de una frontera de periodo.
+- [x] `ROLLOVER-P03` Documentar que dos códigos consecutivos no constituyen dos
+  factores independientes y no detienen el phishing interactivo.
+
+**Criterio de salida:** contrato y casos de abuso escritos antes de crear el
+módulo; ninguna transición queda definida implícitamente por los prompts.
+
+#### Fase 1 — Componentes reutilizables
+
+- [x] `ROLLOVER-P10` Inventariar y reutilizar `pam_common/totp_replay` y la
+  lectura endurecida de secretos sin copiar implementaciones divergentes.
+- [x] `ROLLOVER-P11` Reutilizar `oath_totp_validate3` con ventana cero y
+  comprobar explícitamente el contador exacto devuelto.
+- [x] `ROLLOVER-P12` Introducir interfaces pequeñas para reloj, espera y
+  conversación PAM, sustituibles por dobles de prueba.
+- [x] `ROLLOVER-P13` Añadir pruebas de regresión a los componentes compartidos y
+  verificar que los módulos existentes no cambian de comportamiento.
+
+**Criterio de salida:** las primitivas se prueban sin PAM real ni esperas de 30
+segundos y los consumidores existentes conservan sus puertas en verde.
+
+#### Fase 2 — Máquina de estados y antirreplay
+
+- [x] `ROLLOVER-P20` Implementar el flujo explícito `INICIAL` →
+  `PRIMERO_CONSUMIDO` → `ESPERANDO_SIGUIENTE` → `COMPLETADO|FALLIDO`.
+- [x] `ROLLOVER-P21` Consumir el primer contador bajo bloqueo antes de continuar
+  y no restaurarlo tras un fallo.
+- [x] `ROLLOVER-P22` Calcular la siguiente frontera sin desbordamientos y exigir
+  exactamente `primer_contador + 1`.
+- [x] `ROLLOVER-P23` Rechazar como segundo paso el mismo contador, uno anterior,
+  uno futuro no consecutivo o uno ya consumido.
+- [x] `ROLLOVER-P24` Mantener el bloqueo exclusivo por UID, servicio e identidad
+  del secreto durante toda la secuencia para impedir que dos procesos la
+  compartan.
+- [x] `ROLLOVER-P25` Probar que cancelación, timeout o muerte del proceso liberan
+  el bloqueo sin restaurar el primer contador ya consumido.
+
+**Criterio de salida:** el núcleo determinista completa únicamente la
+transición `N → N+1`; todos los demás caminos terminan en fallo cerrado.
+
+#### Fase 3 — Integración PAM y experiencia de usuario
+
+- [x] `ROLLOVER-P30` Leer y validar el secreto con propietario, modo, tipo,
+  tamaño, enlaces y Base32 estrictos.
+- [x] `ROLLOVER-P31` Implementar prompts inequívocos para el primer código, la
+  espera y el código siguiente sin mostrar contadores internos.
+- [x] `ROLLOVER-P32` Hacer la espera interrumpible y acotada; tratar `EINTR`,
+  cancelación y cierre de la conversación como fallos.
+- [x] `ROLLOVER-P33` Borrar secreto, códigos, respuestas y buffers temporales en
+  todas las salidas.
+- [x] `ROLLOVER-P34` Evitar enumeración trivial de usuarios mediante una ruta de
+  trabajo ficticia para identidades o secretos inválidos.
+- [x] `ROLLOVER-P35` Registrar únicamente usuario, servicio, fase y resultado,
+  nunca códigos, secreto ni contador TOTP.
+
+**Criterio de salida:** integración PAM simulada completa el flujo correcto y
+deniega cualquier error sin filtrar material sensible.
+
+#### Fase 4 — Verificación y hardening
+
+- [x] `ROLLOVER-P40` Probar el inicio, centro y final de un periodo con reloj
+  virtual, incluidos saltos hacia delante y atrás.
+- [ ] `ROLLOVER-P41` Probar código repetido, anterior, futuro, mal formado,
+  timeout, cancelación y error en cada conversación.
+- [x] `ROLLOVER-P42` Probar dos o más procesos concurrentes intentando utilizar
+  la misma secuencia.
+- [ ] `ROLLOVER-P43` Probar secretos ausentes, truncados, multilínea, symlink,
+  hard link, propietario incorrecto y permisos inseguros.
+- [x] `ROLLOVER-P44` Ejecutar GCC y Clang con warnings fatales, análisis
+  estático, ASan, UBSan y Valgrind.
+- [x] `ROLLOVER-P45` Verificar Full RELRO, `BIND_NOW`, pila no ejecutable y
+  ausencia de `RPATH`, `RUNPATH` y `TEXTREL`.
+- [x] `ROLLOVER-P46` Añadir `make test`, `make hardening` y `make verify` como
+  puertas reproducibles.
+
+**Criterio de salida:** todas las pruebas pasan sin esperas reales y la puerta
+completa detecta regresiones funcionales, de concurrencia y de binario ELF.
+
+#### Fase 5 — Documentación, instalación y piloto
+
+- [x] `ROLLOVER-P50` Escribir README con alcance, experiencia de usuario,
+  límites, instalación, desinstalación y recuperación.
+- [x] `ROLLOVER-P51` Añadir el módulo al README principal y a la verificación
+  general solo después de superar su puerta específica.
+- [x] `ROLLOVER-P52` Realizar un piloto con una cuenta no crítica, conservando
+  una sesión administrativa de recuperación y una copia de la pila PAM.
+- [ ] `ROLLOVER-P53` Validar en el piloto éxito, timeout, código repetido,
+  concurrencia y rollback antes de considerar SSH u otro servicio real.
+
+El piloto SSH completó contraseña, primer TOTP, TOTP de `N+1` y apertura de
+sesión. Las pruebas automatizadas cubren timeout, repetición y concurrencia; aún
+falta repetir esos casos y ejecutar el rollback completo sobre el entorno de
+piloto antes de cerrar `ROLLOVER-P53`.
+
+**Criterio de salida:** un administrador puede compilar, probar, instalar,
+revertir y diagnosticar el módulo sin conocimiento implícito.
 
 ### Pruebas de aceptación
 
-- [ ] Dos códigos del mismo contador son rechazados.
-- [ ] Un código capturado anteriormente no completa el flujo.
-- [ ] El segundo código debe corresponder exactamente al periodo siguiente.
-- [ ] Un timeout invalida el primer paso.
-- [ ] Dos autenticaciones simultáneas no pueden compartir la misma secuencia.
+- [x] Dos códigos del mismo contador son rechazados.
+- [x] Un código capturado anteriormente no completa el flujo.
+- [x] El segundo código debe corresponder exactamente al periodo siguiente.
+- [x] Un timeout invalida el primer paso.
+- [x] Dos autenticaciones simultáneas no pueden compartir la misma secuencia.
 
 ### Valor de seguridad
 
@@ -493,6 +666,10 @@ Puede utilizarse para causar denegación de servicio. El diseño deberá equilib
 
 ## 8. `pam_totp_shuffle`: entrada permutada
 
+> **Estado:** implementado en `pam_totp_shuffle/` con permutación completa,
+> validación estricta, antirreplay y cobertura de las 720 permutaciones. La
+> rotación simple de accesibilidad permanece como variante opcional.
+
 ### Idea
 
 Mostrar una permutación aleatoria de las posiciones del código TOTP.
@@ -541,22 +718,22 @@ La permutación completa es la variante principal.
 
 ### Desarrollo
 
-- [ ] `SHUFFLE-01` Generar una permutación uniforme.
-- [ ] `SHUFFLE-02` Mostrar todas las posiciones sin ambigüedad.
-- [ ] `SHUFFLE-03` Validar exactamente seis dígitos.
-- [ ] `SHUFFLE-04` Reconstruir el código sin modificar el buffer original.
-- [ ] `SHUFFLE-05` Limpiar tanto la entrada como el código reconstruido.
+- [x] `SHUFFLE-01` Generar una permutación uniforme.
+- [x] `SHUFFLE-02` Mostrar todas las posiciones sin ambigüedad.
+- [x] `SHUFFLE-03` Validar exactamente seis dígitos.
+- [x] `SHUFFLE-04` Reconstruir el código sin modificar el buffer original.
+- [x] `SHUFFLE-05` Limpiar tanto la entrada como el código reconstruido.
 - [ ] `SHUFFLE-06` Añadir modo de accesibilidad con rotaciones simples.
 - [ ] `SHUFFLE-07` Evitar repetir patrones predecibles.
-- [ ] `SHUFFLE-08` Integrar el antirreplay normal.
+- [x] `SHUFFLE-08` Integrar el antirreplay normal.
 
 ### Pruebas de aceptación
 
-- [ ] Todas las permutaciones reconstruyen correctamente el código.
-- [ ] Posiciones repetidas o ausentes son rechazadas.
-- [ ] Una respuesta correspondiente a otra permutación falla.
-- [ ] No se producen accesos fuera de rango.
-- [ ] El código original y el transformado se limpian de memoria.
+- [x] Todas las permutaciones reconstruyen correctamente el código.
+- [x] Posiciones repetidas o ausentes son rechazadas.
+- [x] Una respuesta correspondiente a otra permutación falla.
+- [x] No se producen accesos fuera de rango.
+- [x] El código original y el transformado se limpian de memoria.
 
 ### Valor de seguridad
 
@@ -965,49 +1142,52 @@ enumerados antes de escribir el módulo.
 
 #### Fase 1 — Componentes comunes sin regresiones
 
-- [ ] `SCHEDPK-10` Extraer el parser/evaluador horario a una biblioteca interna
+- [x] `SCHEDPK-10` Extraer el parser/evaluador horario a una biblioteca interna
   con API pequeña y sin estado global mutable nuevo.
-- [ ] `SCHEDPK-11` Extraer hashing, parsing y comparación de clave parcial a
+- [x] `SCHEDPK-11` Extraer hashing, parsing y comparación de clave parcial a
   primitivas independientes de PAM y del sistema de archivos.
-- [ ] `SCHEDPK-12` Mantener adaptadores compatibles para que los dos módulos
+- [x] `SCHEDPK-12` Mantener adaptadores compatibles para que los dos módulos
   existentes conserven exactamente su comportamiento.
-- [ ] `SCHEDPK-13` Añadir pruebas de regresión antes y después de la extracción.
+- [x] `SCHEDPK-13` Añadir pruebas de regresión antes y después de la extracción.
 
 **Criterio de salida:** `pam_schedule_totp_override` y `pam_partial_key` pasan
 sus puertas actuales sin cambios observables.
 
 #### Fase 2 — Formatos seguros y enrolamiento docente
 
-- [ ] `SCHEDPK-20` Implementar parser cerrado y versionado de configuración.
-- [ ] `SCHEDPK-21` Implementar lectura segura mediante `openat`, `O_NOFOLLOW`,
+- [x] `SCHEDPK-20` Implementar parser cerrado y versionado de configuración.
+- [x] `SCHEDPK-21` Implementar lectura segura mediante `openat`, `O_NOFOLLOW`,
   `fstat`, propietario, modo, tipo, tamaño y número de enlaces.
 - [ ] `SCHEDPK-22` Crear `schedule_partial_key_manager` para alta, rotación,
   inspección de metadatos y revocación explícita.
-- [ ] `SCHEDPK-23` Leer la clave desde TTY o entrada estándar protegida, nunca
+- [x] `SCHEDPK-23` Leer la clave desde TTY o entrada estándar protegida, nunca
   desde `argv`, entorno o logs.
-- [ ] `SCHEDPK-24` Instalar archivos mediante temporal privado, `fsync`,
+- [x] `SCHEDPK-24` Instalar archivos mediante temporal privado, `fsync`,
   `renameat` y sincronización del directorio.
-- [ ] `SCHEDPK-25` Limpiar clave completa, caracteres parciales, hashes y sales
+- [x] `SCHEDPK-25` Limpiar clave completa, caracteres parciales, hashes y sales
   temporales de memoria.
+
+`SCHEDPK-22` permanece abierto porque la utilidad actual cubre alta y rotación,
+pero todavía no ofrece órdenes separadas de inspección y revocación.
 
 **Criterio de salida:** enrolamiento y rotación son atómicos; archivos ausentes,
 corruptos o inseguros fallan de forma cerrada.
 
 #### Fase 3 — Autenticación combinada y estado
 
-- [ ] `SCHEDPK-30` Implementar la bifurcación dentro/fuera de horario.
-- [ ] `SCHEDPK-31` Generar tres posiciones distintas y ordenadas mediante
+- [x] `SCHEDPK-30` Implementar la bifurcación dentro/fuera de horario.
+- [x] `SCHEDPK-31` Generar tres posiciones distintas y ordenadas mediante
   muestreo uniforme sin sesgo.
-- [ ] `SCHEDPK-32` Validar respuesta de longitud exacta y comparar todos los
+- [x] `SCHEDPK-32` Validar respuesta de longitud exacta y comparar todos los
   hashes sin salida temprana dependiente del carácter.
-- [ ] `SCHEDPK-33` Implementar rate limiting por usuario, servicio y autorizador
+- [x] `SCHEDPK-33` Implementar rate limiting por usuario, servicio y autorizador
   usando reloj monotónico.
-- [ ] `SCHEDPK-34` Implementar consumo persistente y concurrente de tríos.
-- [ ] `SCHEDPK-35` Implementar la marca efímera `auth`→`account`, ligada al
+- [x] `SCHEDPK-34` Implementar consumo persistente y concurrente de tríos.
+- [x] `SCHEDPK-35` Implementar la marca efímera `auth`→`account`, ligada al
   contexto PAM y con expiración corta.
-- [ ] `SCHEDPK-36` Auditar aceptación, rechazo, bloqueo, rotación y errores de
+- [x] `SCHEDPK-36` Auditar aceptación, rechazo, bloqueo, rotación y errores de
   estado sin datos sensibles.
-- [ ] `SCHEDPK-37` Denegar ante errores de reloj, aleatoriedad, memoria, estado,
+- [x] `SCHEDPK-37` Denegar ante errores de reloj, aleatoriedad, memoria, estado,
   configuración o conversación PAM.
 
 **Criterio de salida:** el flujo completo funciona en un servicio PAM aislado y
@@ -1021,17 +1201,17 @@ ningún fallo interno concede acceso.
   respuestas cortas/largas y posiciones repetidas.
 - [ ] `SCHEDPK-42` Probar archivos ausentes, truncados, enormes, multilínea,
   symlinks, hard links, FIFO, propietario y permisos incorrectos.
-- [ ] `SCHEDPK-43` Probar contraseña incorrecta: nunca debe solicitarse ni
+- [x] `SCHEDPK-43` Probar contraseña incorrecta: nunca debe solicitarse ni
   consumirse un desafío docente.
-- [ ] `SCHEDPK-44` Probar que un trío aceptado no vuelve a emitirse con la misma
+- [x] `SCHEDPK-44` Probar que un trío aceptado no vuelve a emitirse con la misma
   identidad de clave.
-- [ ] `SCHEDPK-45` Probar carreras entre procesos: un mismo desafío no puede
+- [x] `SCHEDPK-45` Probar carreras entre procesos: un mismo desafío no puede
   aceptarse dos veces ni perder actualizaciones.
-- [ ] `SCHEDPK-46` Probar rate limiting, expiración de marca PAM, cuentas no
+- [x] `SCHEDPK-46` Probar rate limiting, expiración de marca PAM, cuentas no
   gestionadas y aislamiento entre servicios/autorizadores.
 - [ ] `SCHEDPK-47` Añadir fuzzing de configuración, archivo posicional y estado
   persistente.
-- [ ] `SCHEDPK-48` Pasar GCC, Clang, análisis estático, ASan, UBSan, Valgrind,
+- [x] `SCHEDPK-48` Pasar GCC, Clang, análisis estático, ASan, UBSan, Valgrind,
   pruebas ELF y `git diff --check`.
 
 **Criterio de salida:** todas las pruebas positivas, negativas, de permisos,
@@ -1039,15 +1219,15 @@ replay y concurrencia pasan de forma reproducible.
 
 #### Fase 5 — Documentación, empaquetado y recuperación
 
-- [ ] `SCHEDPK-50` Escribir README con modelo de amenazas, límites, ejemplos de
+- [x] `SCHEDPK-50` Escribir README con modelo de amenazas, límites, ejemplos de
   stack PAM y advertencia sobre claves compartidas.
-- [ ] `SCHEDPK-51` Documentar instalación primero en un servicio aislado y
+- [x] `SCHEDPK-51` Documentar instalación primero en un servicio aislado y
   prohibir la modificación automática de `common-auth`.
-- [ ] `SCHEDPK-52` Documentar backup, rollback, revocación, rotación, limpieza
+- [x] `SCHEDPK-52` Documentar backup, rollback, revocación, rotación, limpieza
   del estado y recuperación mediante consola o sesión administrativa abierta.
-- [ ] `SCHEDPK-53` Añadir `make test`, `make verify`, `make install` y
+- [x] `SCHEDPK-53` Añadir `make test`, `make verify`, `make install` y
   `make uninstall`; la desinstalación no borrará claves sin una orden separada.
-- [ ] `SCHEDPK-54` Añadir el módulo a la tabla y verificación general del
+- [x] `SCHEDPK-54` Añadir el módulo a la tabla y verificación general del
   repositorio solo después de superar su puerta específica.
 
 **Criterio de salida:** un administrador puede instalar, probar, revertir,
@@ -1069,20 +1249,20 @@ aceptado explícitamente antes del despliegue amplio.
 
 ### Pruebas de aceptación
 
-- [ ] Dentro del horario, una contraseña correcta permite acceso sin desafío.
-- [ ] Fuera del horario, la contraseña por sí sola no permite acceso.
-- [ ] Fuera del horario, las tres posiciones correctas autorizan la cuenta.
-- [ ] Una contraseña incorrecta nunca muestra el desafío docente.
-- [ ] La clave de un autorizador no funciona para una regla asociada a otro.
-- [ ] Una respuesta correcta para otro trío u orden es rechazada.
-- [ ] Un trío consumido no vuelve a emitirse mientras la clave siga vigente.
-- [ ] Dos procesos concurrentes no pueden consumir el mismo desafío.
-- [ ] Reiniciar no reactiva los tríos persistentes ya consumidos.
-- [ ] Rotar la clave invalida inmediatamente respuestas y estado anteriores.
-- [ ] Configuración, clave o estado ausente/corrupto/inseguro deniegan acceso.
-- [ ] El rate limiting no puede omitirse cambiando el reloj de pared.
-- [ ] `account` deniega una excepción sin una marca válida de `auth`.
-- [ ] Los logs permiten auditar el evento sin revelar posiciones ni respuestas.
+- [x] Dentro del horario, una contraseña correcta permite acceso sin desafío.
+- [x] Fuera del horario, la contraseña por sí sola no permite acceso.
+- [x] Fuera del horario, las tres posiciones correctas autorizan la cuenta.
+- [x] Una contraseña incorrecta nunca muestra el desafío docente.
+- [x] La clave de un autorizador no funciona para una regla asociada a otro.
+- [x] Una respuesta correcta para otro trío u orden es rechazada.
+- [x] Un trío consumido no vuelve a emitirse mientras la clave siga vigente.
+- [x] Dos procesos concurrentes no pueden consumir el mismo desafío.
+- [x] Reiniciar no reactiva los tríos persistentes ya consumidos.
+- [x] Rotar la clave invalida inmediatamente respuestas y estado anteriores.
+- [x] Configuración, clave o estado ausente/corrupto/inseguro deniegan acceso.
+- [x] El rate limiting no puede omitirse cambiando el reloj de pared.
+- [x] `account` deniega una excepción sin una marca válida de `auth`.
+- [x] Los logs permiten auditar el evento sin revelar posiciones ni respuestas.
 
 ### Riesgos y límites
 
@@ -1166,8 +1346,8 @@ Los componentes comunes tienen una API pequeña y no cambian el comportamiento d
 
 Implementar:
 
-1. `pam_totp_domains`
-2. `pam_totp_epoch_guard`
+1. [x] `pam_totp_domains`
+2. [ ] `pam_totp_epoch_guard`
 
 #### Criterio de salida
 
@@ -1179,8 +1359,8 @@ Implementar:
 
 Implementar:
 
-1. `pam_totp_slot_challenge`
-2. `pam_totp_quorum`
+1. [x] `pam_totp_slot_challenge`
+2. [ ] `pam_totp_quorum`
 
 #### Criterio de salida
 
@@ -1192,8 +1372,9 @@ Implementar:
 
 Implementar:
 
-1. `pam_totp_rollover`
-2. `pam_totp_ladder`
+1. [x] `pam_totp_rollover` — implementación y piloto positivo disponibles;
+   quedan casos negativos y rollback ampliados en el entorno de piloto.
+2. [ ] `pam_totp_ladder` — comenzará después de estabilizar `rollover`.
 
 #### Criterio de salida
 
@@ -1205,7 +1386,7 @@ Implementar:
 
 Implementar:
 
-1. `pam_totp_sealed_seed`
+1. [ ] `pam_totp_sealed_seed`
 
 #### Criterio de salida
 
@@ -1218,11 +1399,12 @@ Implementar:
 
 Evaluar por separado:
 
-1. `pam_totp_shuffle`
-2. `pam_totp_ticket`
-3. `pam_totp_duress`
-4. `pam_schedule_totp_override`
-5. `pam_schedule_partial_key_override`
+1. [x] `pam_totp_shuffle`
+2. [ ] `pam_totp_ticket`
+3. [ ] `pam_totp_duress`
+4. [x] `pam_schedule_totp_override`
+5. [x] `pam_schedule_partial_key_override` — implementación inicial; mantiene
+   abiertas las tareas indicadas en su plan específico.
 
 #### Criterio de salida
 

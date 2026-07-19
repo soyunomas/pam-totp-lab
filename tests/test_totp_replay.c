@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <stdint.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -224,6 +225,175 @@ static void test_concurrency(int directory_fd, uid_t owner)
     }
 }
 
+static void test_transaction(int directory_fd, uid_t owner)
+{
+    const uid_t user_id = (uid_t)1008;
+    struct totp_replay_transaction *transaction = NULL;
+
+    expect_result("transaction begin",
+                  totp_replay_transaction_begin_at(
+                      directory_fd, owner, "transaction", user_id,
+                      &transaction),
+                  TOTP_REPLAY_ACCEPTED);
+    expect_result("transaction first consume",
+                  totp_replay_transaction_consume(transaction, UINT64_C(200)),
+                  TOTP_REPLAY_ACCEPTED);
+    expect_result("transaction same consume",
+                  totp_replay_transaction_consume(transaction, UINT64_C(200)),
+                  TOTP_REPLAY_DETECTED);
+    expect_result("transaction second consume",
+                  totp_replay_transaction_consume(transaction, UINT64_C(201)),
+                  TOTP_REPLAY_ACCEPTED);
+    totp_replay_transaction_end(&transaction);
+    if (transaction != NULL) {
+        fprintf(stderr, "FAIL transaction end did not clear pointer\n");
+        failures++;
+    }
+
+    expect_result("transaction reopen",
+                  totp_replay_transaction_begin_at(
+                      directory_fd, owner, "transaction", user_id,
+                      &transaction),
+                  TOTP_REPLAY_ACCEPTED);
+    expect_result("transaction persisted replay",
+                  totp_replay_transaction_consume(transaction, UINT64_C(201)),
+                  TOTP_REPLAY_DETECTED);
+    expect_result("transaction persisted next",
+                  totp_replay_transaction_consume(transaction, UINT64_C(202)),
+                  TOTP_REPLAY_ACCEPTED);
+    totp_replay_transaction_end(&transaction);
+}
+
+static void test_transaction_busy(int directory_fd, uid_t owner)
+{
+    const uid_t user_id = (uid_t)1009;
+    struct totp_replay_transaction *transaction = NULL;
+    pid_t child;
+    int status;
+
+    expect_result("busy parent begin",
+                  totp_replay_transaction_begin_at(
+                      directory_fd, owner, "busy", user_id, &transaction),
+                  TOTP_REPLAY_ACCEPTED);
+    expect_result("busy parent consumes first",
+                  totp_replay_transaction_consume(transaction, UINT64_C(300)),
+                  TOTP_REPLAY_ACCEPTED);
+
+    child = fork();
+    if (child < 0) {
+        perror("fork busy transaction");
+        failures++;
+    } else if (child == 0) {
+        struct totp_replay_transaction *other = NULL;
+        int child_result;
+
+        totp_replay_transaction_end(&transaction);
+        child_result = totp_replay_transaction_begin_at(
+            directory_fd, owner, "busy", user_id, &other);
+        totp_replay_transaction_end(&other);
+        _exit(child_result == TOTP_REPLAY_BUSY ? 0 : 1);
+    } else {
+        do {
+            status = 0;
+        } while (waitpid(child, &status, 0) < 0 && errno == EINTR);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "FAIL transaction lock was not busy\n");
+            failures++;
+        }
+    }
+
+    totp_replay_transaction_end(&transaction);
+    expect_result("busy first remains consumed",
+                  totp_replay_transaction_begin_at(
+                      directory_fd, owner, "busy", user_id, &transaction),
+                  TOTP_REPLAY_ACCEPTED);
+    expect_result("busy persisted after release",
+                  totp_replay_transaction_consume(transaction, UINT64_C(300)),
+                  TOTP_REPLAY_DETECTED);
+    totp_replay_transaction_end(&transaction);
+}
+
+static void test_transaction_process_death(int directory_fd, uid_t owner)
+{
+    const uid_t user_id = (uid_t)1010;
+    int ready_pipe[2];
+    pid_t child;
+    int status;
+    char ready = '\0';
+    struct totp_replay_transaction *transaction = NULL;
+
+    if (pipe(ready_pipe) != 0) {
+        perror("pipe death transaction");
+        failures++;
+        return;
+    }
+    child = fork();
+    if (child < 0) {
+        perror("fork death transaction");
+        close(ready_pipe[0]);
+        close(ready_pipe[1]);
+        failures++;
+        return;
+    }
+    if (child == 0) {
+        int child_result;
+
+        close(ready_pipe[0]);
+        child_result = totp_replay_transaction_begin_at(
+            directory_fd, owner, "death", user_id, &transaction);
+        if (child_result != TOTP_REPLAY_ACCEPTED ||
+            totp_replay_transaction_consume(transaction, UINT64_C(400)) !=
+                TOTP_REPLAY_ACCEPTED ||
+            write(ready_pipe[1], "R", 1U) != 1) {
+            _exit(2);
+        }
+        for (;;) pause();
+    }
+
+    close(ready_pipe[1]);
+    if (read(ready_pipe[0], &ready, 1U) != 1 || ready != 'R') {
+        fprintf(stderr, "FAIL child did not hold death transaction\n");
+        failures++;
+    } else {
+        expect_result("death transaction busy",
+                      totp_replay_transaction_begin_at(
+                          directory_fd, owner, "death", user_id,
+                          &transaction),
+                      TOTP_REPLAY_BUSY);
+    }
+    close(ready_pipe[0]);
+    if (kill(child, SIGKILL) != 0 || waitpid(child, &status, 0) != child ||
+        !WIFSIGNALED(status)) {
+        fprintf(stderr, "FAIL could not terminate transaction owner\n");
+        failures++;
+    }
+
+    expect_result("death lock released",
+                  totp_replay_transaction_begin_at(
+                      directory_fd, owner, "death", user_id, &transaction),
+                  TOTP_REPLAY_ACCEPTED);
+    expect_result("death first remains consumed",
+                  totp_replay_transaction_consume(transaction, UINT64_C(400)),
+                  TOTP_REPLAY_DETECTED);
+    totp_replay_transaction_end(&transaction);
+}
+
+static void test_transaction_output_cleared(int directory_fd, uid_t owner)
+{
+    struct totp_replay_transaction *transaction =
+        (struct totp_replay_transaction *)(uintptr_t)1U;
+
+    expect_result("invalid transaction tag",
+                  totp_replay_transaction_begin_at(
+                      directory_fd, owner, "../invalid", (uid_t)1011,
+                      &transaction),
+                  TOTP_REPLAY_ERROR);
+    if (transaction != NULL) {
+        fprintf(stderr, "FAIL transaction output not cleared\n");
+        failures++;
+    }
+}
+
 int main(void)
 {
     char directory_template[] = "/tmp/pam-totp-replay-XXXXXX";
@@ -249,6 +419,10 @@ int main(void)
     test_symlink_rejected(directory_fd, owner);
     test_input_and_owner_validation(directory_fd, owner);
     test_concurrency(directory_fd, owner);
+    test_transaction(directory_fd, owner);
+    test_transaction_busy(directory_fd, owner);
+    test_transaction_process_death(directory_fd, owner);
+    test_transaction_output_cleared(directory_fd, owner);
 
     remove_state_pair(directory_fd, "basic", (uid_t)1001);
     remove_state_pair(directory_fd, "max", (uid_t)1002);
@@ -256,6 +430,9 @@ int main(void)
     remove_state_pair(directory_fd, "empty", (uid_t)1004);
     remove_state_pair(directory_fd, "symlink", (uid_t)1005);
     remove_state_pair(directory_fd, "parallel", (uid_t)1007);
+    remove_state_pair(directory_fd, "transaction", (uid_t)1008);
+    remove_state_pair(directory_fd, "busy", (uid_t)1009);
+    remove_state_pair(directory_fd, "death", (uid_t)1010);
 
     if (close(directory_fd) != 0) {
         perror("close temporary directory");

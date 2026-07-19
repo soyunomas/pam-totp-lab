@@ -6,7 +6,7 @@ Colección experimental y educativa de módulos **PAM (Pluggable Authentication 
 
 ## Resumen de implementaciones
 
-El repositorio contiene once implementaciones. Todas disponen de un directorio propio y documentación específica.
+El repositorio contiene doce implementaciones. Todas disponen de un directorio propio y documentación específica.
 
 | Implementación | Descripción breve | Documentación |
 | :--- | :--- | :--- |
@@ -15,6 +15,7 @@ El repositorio contiene once implementaciones. Todas disponen de un directorio p
 | `pam_totp_domains` | Usa un secreto TOTP distinto según el servicio PAM. | [README](./pam_totp_domains/README.md) |
 | `pam_totp_shuffle` | Solicita los dígitos TOTP en un orden aleatorio. | [README](./pam_totp_shuffle/README.md) |
 | `pam_totp_slot_challenge` | Selecciona aleatoriamente uno de varios secretos TOTP. | [README](./pam_totp_slot_challenge/README.md) |
+| `pam_totp_rollover` | Exige códigos TOTP de dos periodos consecutivos. | [README](./pam_totp_rollover/README.md) |
 | `pam_chronoguard` | Añade patrones derivados del tiempo a una contraseña. | [README](./pam_chronoguard/README.md) |
 | `pam_partial_key` | Solicita posiciones aleatorias de una clave maestra. | [README](./pam_partial_key/README.md) |
 | `pam_school_schedule` | Autoriza el acceso según una agenda y la hora local. | [README](./pam_school_schedule/README.md) |
@@ -69,7 +70,19 @@ Selecciona aleatoriamente uno de 2–4 secretos TOTP de un mismo usuario.
 - No es un quorum ni un factor adicional.
 - [Documentación](./pam_totp_slot_challenge/README.md)
 
-### 6. `pam_chronoguard`
+### 6. `pam_totp_rollover`
+
+Exige un TOTP del periodo actual y otro del periodo inmediatamente siguiente.
+
+- Ventana cero para el primer código y secuencia exacta `N → N+1`.
+- Bloqueo no bloqueante y antirreplay durante los dos prompts.
+- Reloj monotónico para espera y deadline, con pruebas sin esperas reales.
+- Implementación compilable, endurecida y validada en un piloto SSH con una
+  cuenta no crítica y una sesión administrativa de recuperación.
+- Mitiga la captura aislada de un código; no evita phishing en tiempo real.
+- [Documentación](./pam_totp_rollover/README.md)
+
+### 7. `pam_chronoguard`
 
 Aplica prefijos y sufijos derivados del tiempo a una contraseña.
 
@@ -77,7 +90,7 @@ Aplica prefijos y sufijos derivados del tiempo a una contraseña.
 - Mecanismo experimental de ofuscación temporal.
 - [Documentación](./pam_chronoguard/README.md)
 
-### 7. `pam_partial_key`
+### 8. `pam_partial_key`
 
 Solicita posiciones aleatorias de una clave maestra.
 
@@ -85,7 +98,7 @@ Solicita posiciones aleatorias de una clave maestra.
 - No es MFA; observaciones repetidas pueden revelar posiciones.
 - [Documentación](./pam_partial_key/README.md)
 
-### 8. `pam_school_schedule`
+### 9. `pam_school_schedule`
 
 Autoriza según una agenda local y variables temporales.
 
@@ -93,7 +106,7 @@ Autoriza según una agenda local y variables temporales.
 - Falla de forma cerrada si la configuración no es válida.
 - [Documentación](./pam_school_schedule/README.md)
 
-### 9. `pam_2man_totp`
+### 10. `pam_2man_totp`
 
 Requiere la autenticación secuencial de dos usuarios distintos.
 
@@ -101,7 +114,7 @@ Requiere la autenticación secuencial de dos usuarios distintos.
 - Orientado a operaciones donde una sola persona no debe actuar sola.
 - [Documentación](./pam_2man_totp/README.md)
 
-### 10. `pam_schedule_totp_override`
+### 11. `pam_schedule_totp_override`
 
 Aplica un horario por cuenta y exige un TOTP docente específico fuera de la franja ordinaria.
 
@@ -112,7 +125,7 @@ Aplica un horario por cuenta y exige un TOTP docente específico fuera de la fra
 - No resuelve la falta de atribución causada por contraseñas compartidas.
 - [Documentación](./pam_schedule_totp_override/README.md)
 
-### 11. `pam_schedule_partial_key_override`
+### 12. `pam_schedule_partial_key_override`
 
 Aplica un horario por cuenta y solicita tres posiciones de una clave docente fuera de la franja ordinaria.
 
@@ -131,6 +144,7 @@ Aplica un horario por cuenta y solicita tres posiciones de una clave docente fue
 | `pam_totp_domains` | TOTP por servicio | Prompt del dominio | Compromiso transversal de un secreto |
 | `pam_totp_shuffle` | TOTP permutado | Desafío de orden | Observación parcial de la entrada |
 | `pam_totp_slot_challenge` | Varios TOTP | Un slot aleatorio | Compromiso aislado de un secreto |
+| `pam_totp_rollover` | TOTP consecutivo | Dos prompts separados por un periodo | Captura aislada de un código |
 | `pam_chronoguard` | Patrón temporal | Un prompt | Observación parcial y variación temporal |
 | `pam_partial_key` | Hash posicional | Desafío de posiciones | Captura parcial por keylogger |
 | `pam_school_schedule` | Agenda y reloj | Prompt contextual | Acceso fuera de horario |
@@ -159,6 +173,7 @@ Puertas específicas disponibles cuando la carpeta correspondiente está present
 make -C pam_totp_domains verify
 make -C pam_totp_shuffle verify
 make -C pam_totp_slot_challenge verify
+make -C pam_totp_rollover verify
 make -C pam_schedule_totp_override verify
 make -C pam_schedule_partial_key_override verify
 ```
@@ -166,3 +181,7 @@ make -C pam_schedule_partial_key_override verify
 ## Advertencia de despliegue
 
 El repositorio es un laboratorio. No modifiques `common-auth` durante las primeras pruebas. Mantén una sesión administrativa o consola local abierta, realiza copias de la configuración de `/etc/pam.d/` y prueba primero con una cuenta no crítica.
+
+No publiques contraseñas, semillas Base32, códigos TOTP ni archivos de
+enrolamiento. Los ejemplos del repositorio usan valores ficticios; genera un
+secreto independiente para cada cuenta y distribúyelo por un canal seguro.

@@ -27,6 +27,7 @@ PRODUCTION_DIR := $(BUILD_DIR)/production
 PRODUCTION_ARTIFACTS := \
 	$(PRODUCTION_DIR)/pam_sandwich.so \
 	$(PRODUCTION_DIR)/pam_strict_totp.so \
+	$(PRODUCTION_DIR)/pam_totp_rollover.so \
 	$(PRODUCTION_DIR)/pam_chronoguard.so \
 	$(PRODUCTION_DIR)/pam_partial_key.so \
 	$(PRODUCTION_DIR)/pk_manager \
@@ -94,6 +95,20 @@ $(PRODUCTION_DIR)/pam_strict_totp.so: ../pam_strict_totp/pam_strict_totp.c \
 		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
 	$(CC) $(MODULE_CFLAGS) -shared ../pam_strict_totp/pam_strict_totp.c \
 		../pam_common/totp_replay.c -o $@ -lpam -loath -pthread \
+		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(PRODUCTION_DIR)/pam_totp_rollover.so: \
+		../pam_totp_rollover/pam_totp_rollover.c \
+		../pam_totp_rollover/rollover.c ../pam_totp_rollover/rollover_clock.c \
+		../pam_totp_rollover/rollover.h ../pam_totp_rollover/rollover_clock.h \
+		../pam_totp_rollover/scope.c ../pam_totp_rollover/scope.h \
+		../pam_common/user_totp_secret.c ../pam_common/user_totp_secret.h \
+		../pam_common/totp_replay.c ../pam_common/totp_replay.h | $(PRODUCTION_DIR)
+	$(CC) $(MODULE_CFLAGS) -shared \
+		../pam_totp_rollover/pam_totp_rollover.c \
+		../pam_totp_rollover/rollover.c ../pam_totp_rollover/rollover_clock.c \
+		../pam_totp_rollover/scope.c ../pam_common/user_totp_secret.c \
+		../pam_common/totp_replay.c -o $@ -lpam -loath -lcrypto -pthread \
 		$(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(PRODUCTION_DIR)/pam_chronoguard.so: ../pam_chronoguard/pam_chronoguard.c | $(PRODUCTION_DIR)
@@ -171,6 +186,11 @@ analyze:
 analyze-production:
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam-sandwich/pam_sandwich.c
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_strict_totp/pam_strict_totp.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_totp_rollover/pam_totp_rollover.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_totp_rollover/rollover.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_totp_rollover/rollover_clock.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_totp_rollover/scope.c
+	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_common/user_totp_secret.c
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_chronoguard/pam_chronoguard.c
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_partial_key/pam_partial_key.c
 	$(CLANG) --analyze -Xanalyzer -analyzer-output=text ../pam_partial_key/keyfile.c

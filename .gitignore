@@ -59,3 +59,7 @@ dkms.conf
 /pam_totp_domains/build/
 /pam_totp_shuffle/build/
 /pam_totp_shuffle/*.plist
+/pam_totp_rollover/build/
+/pam_totp_rollover/*.plist
+/pam_totp_rollover/tests/*.plist
+/pam_common/*.plist

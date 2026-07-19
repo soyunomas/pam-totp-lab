@@ -8,8 +8,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/random.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -19,6 +21,18 @@
 #define STATE_NAME_SIZE 96U
 #define COUNTER_DIGITS 20U
 #define COUNTER_RECORD_SIZE (COUNTER_DIGITS + 1U)
+#define TEMP_NAME_SIZE 160U
+
+struct totp_replay_transaction {
+    int directory_fd;
+    int lock_fd;
+    int state_fd;
+    uid_t expected_owner;
+    char state_name[STATE_NAME_SIZE];
+    uint64_t stored_counter;
+    int has_counter;
+    int poisoned;
+};
 
 static int validate_module_tag(const char *module_tag)
 {
@@ -136,58 +150,265 @@ static int write_counter_record(int fd, uint64_t counter)
     return 0;
 }
 
-static int check_and_store_at(int state_dir_fd, uid_t expected_owner,
-                              const char *module_tag, uid_t user_id,
-                              uint64_t counter)
+static int random_nonce(uint64_t *nonce_out)
 {
+    unsigned char *cursor = (unsigned char *)nonce_out;
+    size_t total = 0U;
+
+    if (nonce_out == NULL) return -1;
+    while (total < sizeof(*nonce_out)) {
+        ssize_t count = getrandom(cursor + total, sizeof(*nonce_out) - total,
+                                  0U);
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (count == 0) return -1;
+        total += (size_t)count;
+    }
+    return 0;
+}
+
+static int replace_counter_record(
+    struct totp_replay_transaction *transaction, uint64_t counter)
+{
+    char temporary[TEMP_NAME_SIZE];
+    uint64_t nonce = UINT64_C(0);
+    int temporary_fd = -1;
+    int replacement_fd = -1;
+    int formatted;
+    int renamed = 0;
+    int result = -1;
+
+    memset(temporary, 0, sizeof(temporary));
+    if (random_nonce(&nonce) != 0) goto cleanup;
+    formatted = snprintf(temporary, sizeof(temporary), ".%s-%016" PRIx64 ".tmp",
+                         transaction->state_name, nonce);
+    nonce = UINT64_C(0);
+    if (formatted < 0 || (size_t)formatted >= sizeof(temporary)) goto cleanup;
+
+    temporary_fd = openat(transaction->directory_fd, temporary,
+                          O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC |
+                              O_NONBLOCK,
+                          (mode_t)0600);
+    if (temporary_fd < 0 ||
+        validate_regular_file(temporary_fd, transaction->expected_owner) != 0 ||
+        write_counter_record(temporary_fd, counter) != 0) {
+        goto cleanup;
+    }
+    if (close(temporary_fd) != 0) {
+        temporary_fd = -1;
+        goto cleanup;
+    }
+    temporary_fd = -1;
+
+    if (renameat(transaction->directory_fd, temporary,
+                 transaction->directory_fd, transaction->state_name) != 0) {
+        goto cleanup;
+    }
+    renamed = 1;
+    if (fsync(transaction->directory_fd) != 0) goto cleanup;
+
+    replacement_fd = openat(
+        transaction->directory_fd, transaction->state_name,
+        O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (replacement_fd < 0 ||
+        validate_regular_file(replacement_fd, transaction->expected_owner) !=
+            0) {
+        goto cleanup;
+    }
+    if (transaction->state_fd >= 0) close(transaction->state_fd);
+    transaction->state_fd = replacement_fd;
+    replacement_fd = -1;
+    result = 0;
+
+cleanup:
+    if (temporary_fd >= 0) close(temporary_fd);
+    if (replacement_fd >= 0) close(replacement_fd);
+    if (!renamed && temporary[0] != '\0') {
+        (void)unlinkat(transaction->directory_fd, temporary, 0);
+    }
+    memset(temporary, 0, sizeof(temporary));
+    return result;
+}
+
+static void close_transaction(struct totp_replay_transaction *transaction)
+{
+    if (transaction == NULL) return;
+    if (transaction->state_fd >= 0) close(transaction->state_fd);
+    if (transaction->lock_fd >= 0) close(transaction->lock_fd);
+    if (transaction->directory_fd >= 0) close(transaction->directory_fd);
+    memset(transaction, 0, sizeof(*transaction));
+    free(transaction);
+}
+
+static int begin_transaction_at(int state_dir_fd, uid_t expected_owner,
+                                const char *module_tag, uid_t user_id,
+                                int nonblocking,
+                                struct totp_replay_transaction **out)
+{
+    struct totp_replay_transaction *transaction = NULL;
     char lock_name[STATE_NAME_SIZE];
-    char state_name[STATE_NAME_SIZE];
-    int lock_fd = -1;
-    int state_fd = -1;
-    int created = 0;
     int ignored_created = 0;
+    int formatted;
     int result = TOTP_REPLAY_ERROR;
     struct stat state_stat;
-    uint64_t stored_counter = 0U;
 
+    if (out == NULL) return TOTP_REPLAY_ERROR;
+    *out = NULL;
     if (validate_module_tag(module_tag) != 0 ||
         validate_directory(state_dir_fd, expected_owner, (mode_t)0077) != 0) {
         return TOTP_REPLAY_ERROR;
     }
-    if (snprintf(lock_name, sizeof(lock_name), "%s-%" PRIuMAX ".lock",
-                 module_tag, (uintmax_t)user_id) >= (int)sizeof(lock_name) ||
-        snprintf(state_name, sizeof(state_name), "%s-%" PRIuMAX ".counter",
-                 module_tag, (uintmax_t)user_id) >= (int)sizeof(state_name)) {
+    formatted = snprintf(lock_name, sizeof(lock_name), "%s-%" PRIuMAX ".lock",
+                         module_tag, (uintmax_t)user_id);
+    if (formatted < 0 || (size_t)formatted >= sizeof(lock_name)) {
         return TOTP_REPLAY_ERROR;
     }
 
-    lock_fd = open_private_file_at(state_dir_fd, lock_name, &ignored_created);
-    if (lock_fd < 0) goto cleanup;
-    if (flock(lock_fd, LOCK_EX) != 0) goto cleanup;
-    if (validate_regular_file(lock_fd, expected_owner) != 0) goto cleanup;
+    transaction = calloc(1U, sizeof(*transaction));
+    if (transaction == NULL) return TOTP_REPLAY_ERROR;
+    transaction->directory_fd = -1;
+    transaction->lock_fd = -1;
+    transaction->state_fd = -1;
+    transaction->expected_owner = expected_owner;
+    formatted = snprintf(transaction->state_name,
+                         sizeof(transaction->state_name),
+                         "%s-%" PRIuMAX ".counter", module_tag,
+                         (uintmax_t)user_id);
+    if (formatted < 0 ||
+        (size_t)formatted >= sizeof(transaction->state_name)) {
+        goto cleanup;
+    }
+    transaction->directory_fd =
+        fcntl(state_dir_fd, F_DUPFD_CLOEXEC, 0);
+    if (transaction->directory_fd < 0) goto cleanup;
 
-    state_fd = open_private_file_at(state_dir_fd, state_name, &created);
-    if (state_fd < 0) goto cleanup;
-    if (validate_regular_file(state_fd, expected_owner) != 0) goto cleanup;
-    if (fstat(state_fd, &state_stat) != 0) goto cleanup;
-
-    if (created && state_stat.st_size == (off_t)0) {
-        /* No accepted counter exists yet. */
-    } else {
-        if (state_stat.st_size != (off_t)COUNTER_RECORD_SIZE) goto cleanup;
-        if (read_counter_record(state_fd, &stored_counter) != 0) goto cleanup;
-        if (counter <= stored_counter) {
-            result = TOTP_REPLAY_DETECTED;
-            goto cleanup;
+    transaction->lock_fd = open_private_file_at(
+        transaction->directory_fd, lock_name, &ignored_created);
+    if (transaction->lock_fd < 0) goto cleanup;
+    if (flock(transaction->lock_fd,
+              LOCK_EX | (nonblocking ? LOCK_NB : 0)) != 0) {
+        if (nonblocking && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+            result = TOTP_REPLAY_BUSY;
         }
+        goto cleanup;
+    }
+    if (validate_regular_file(transaction->lock_fd, expected_owner) != 0) {
+        goto cleanup;
     }
 
-    if (write_counter_record(state_fd, counter) != 0) goto cleanup;
+    transaction->state_fd = openat(
+        transaction->directory_fd, transaction->state_name,
+        O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (transaction->state_fd < 0) {
+        if (errno != ENOENT) goto cleanup;
+    } else {
+        if (validate_regular_file(transaction->state_fd, expected_owner) != 0 ||
+            fstat(transaction->state_fd, &state_stat) != 0) {
+            goto cleanup;
+        }
+        if (state_stat.st_size != (off_t)COUNTER_RECORD_SIZE) goto cleanup;
+        if (read_counter_record(transaction->state_fd,
+                                &transaction->stored_counter) != 0) {
+            goto cleanup;
+        }
+        transaction->has_counter = 1;
+    }
+
     result = TOTP_REPLAY_ACCEPTED;
+    *out = transaction;
+    transaction = NULL;
 
 cleanup:
-    if (state_fd >= 0) close(state_fd);
-    if (lock_fd >= 0) close(lock_fd);
+    close_transaction(transaction);
+    return result;
+}
+
+int totp_replay_transaction_consume(struct totp_replay_transaction *transaction,
+                                    uint64_t counter)
+{
+    if (transaction == NULL || transaction->directory_fd < 0 ||
+        transaction->lock_fd < 0 || transaction->poisoned) {
+        return TOTP_REPLAY_ERROR;
+    }
+    if (transaction->has_counter && counter <= transaction->stored_counter) {
+        return TOTP_REPLAY_DETECTED;
+    }
+
+    if (replace_counter_record(transaction, counter) != 0) {
+        transaction->poisoned = 1;
+        return TOTP_REPLAY_ERROR;
+    }
+    transaction->stored_counter = counter;
+    transaction->has_counter = 1;
+    return TOTP_REPLAY_ACCEPTED;
+}
+
+void totp_replay_transaction_end(struct totp_replay_transaction **transaction)
+{
+    if (transaction == NULL || *transaction == NULL) return;
+    close_transaction(*transaction);
+    *transaction = NULL;
+}
+
+static int check_and_store_at(int state_dir_fd, uid_t expected_owner,
+                              const char *module_tag, uid_t user_id,
+                              uint64_t counter)
+{
+    struct totp_replay_transaction *transaction = NULL;
+    int result = begin_transaction_at(state_dir_fd, expected_owner, module_tag,
+                                      user_id, 0, &transaction);
+
+    if (result == TOTP_REPLAY_ACCEPTED) {
+        result = totp_replay_transaction_consume(transaction, counter);
+    }
+    totp_replay_transaction_end(&transaction);
+    return result;
+}
+
+static int open_runtime_state_directory(void)
+{
+    int parent_fd = -1;
+    int state_dir_fd = -1;
+
+    parent_fd = open(RUNTIME_PARENT,
+                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (parent_fd < 0 ||
+        validate_directory(parent_fd, (uid_t)0, (mode_t)0022) != 0) {
+        goto cleanup;
+    }
+    if (mkdirat(parent_fd, STATE_DIRECTORY, (mode_t)0700) != 0 &&
+        errno != EEXIST) {
+        goto cleanup;
+    }
+    state_dir_fd = openat(parent_fd, STATE_DIRECTORY,
+                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (state_dir_fd < 0 ||
+        validate_directory(state_dir_fd, (uid_t)0, (mode_t)0077) != 0) {
+        if (state_dir_fd >= 0) close(state_dir_fd);
+        state_dir_fd = -1;
+    }
+
+cleanup:
+    if (parent_fd >= 0) close(parent_fd);
+    return state_dir_fd;
+}
+
+int totp_replay_transaction_begin(const char *module_tag, uid_t user_id,
+                                  struct totp_replay_transaction **out)
+{
+    int state_dir_fd;
+    int result;
+
+    if (out == NULL) return TOTP_REPLAY_ERROR;
+    *out = NULL;
+    if (geteuid() != (uid_t)0) return TOTP_REPLAY_ERROR;
+    state_dir_fd = open_runtime_state_directory();
+    if (state_dir_fd < 0) return TOTP_REPLAY_ERROR;
+    result = begin_transaction_at(state_dir_fd, (uid_t)0, module_tag, user_id,
+                                  1, out);
+    close(state_dir_fd);
     return result;
 }
 
@@ -230,5 +451,13 @@ int totp_replay_check_and_store_at(int state_dir_fd, uid_t expected_owner,
 {
     return check_and_store_at(state_dir_fd, expected_owner, module_tag, user_id,
                               counter);
+}
+
+int totp_replay_transaction_begin_at(
+    int state_dir_fd, uid_t expected_owner, const char *module_tag,
+    uid_t user_id, struct totp_replay_transaction **out)
+{
+    return begin_transaction_at(state_dir_fd, expected_owner, module_tag,
+                                user_id, 1, out);
 }
 #endif
