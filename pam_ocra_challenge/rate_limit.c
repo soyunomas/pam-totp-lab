@@ -749,6 +749,47 @@ cleanup:
     return result;
 }
 
+int ocra_rate_limit_remove_at(int root_fd, const char *uid_text,
+                              const char *service, const char *key_id)
+{
+    char state_name[RATE_LIMIT_NAME_MAX];
+    char lock_name[RATE_LIMIT_NAME_MAX];
+    char temp_name[RATE_LIMIT_NAME_MAX];
+    struct rate_limit_state state;
+    int lock_fd = -1;
+    int state_fd = -1;
+    int result = -1;
+
+    (void)memset(&state, 0, sizeof(state));
+    if (root_fd < 0 || !directory_metadata_is_valid(root_fd, 1) ||
+        build_names(uid_text, service, key_id, state_name, lock_name,
+                    temp_name) != 0) {
+        return -1;
+    }
+    lock_fd = open_scope_lock(root_fd, lock_name);
+    if (lock_fd < 0 ||
+        load_state_file(root_fd, state_name, &state, &state_fd, 1) != 0 ||
+        remove_valid_stale_temp(root_fd, temp_name) != 0) {
+        goto cleanup;
+    }
+    if (state_fd >= 0 && unlinkat(root_fd, state_name, 0) != 0) {
+        goto cleanup;
+    }
+    if (fsync(root_fd) == 0) {
+        result = 0;
+    }
+
+cleanup:
+    if (state_fd >= 0 && close(state_fd) != 0) {
+        result = -1;
+    }
+    if (lock_fd >= 0 && close(lock_fd) != 0) {
+        result = -1;
+    }
+    (void)memset(&state, 0, sizeof(state));
+    return result;
+}
+
 static int open_or_create_directory(int parent_fd, const char *name)
 {
     int created = 0;
@@ -868,6 +909,30 @@ int ocra_rate_limit_reset(uid_t uid, const char *service, const char *key_id)
         return -1;
     }
     result = ocra_rate_limit_reset_at(root_fd, uid_text, service, key_id);
+    if (close(root_fd) != 0) {
+        result = -1;
+    }
+    (void)memset(uid_text, 0, sizeof(uid_text));
+    return result;
+}
+
+int ocra_rate_limit_remove(uid_t uid, const char *service, const char *key_id)
+{
+    char uid_text[OCRA_UID_TEXT_MAX_LENGTH + 1U];
+    int root_fd;
+    int count;
+    int result;
+
+    count = snprintf(uid_text, sizeof(uid_text), "%" PRIuMAX, (uintmax_t)uid);
+    if (count < 0 || (size_t)count >= sizeof(uid_text)) {
+        return -1;
+    }
+    root_fd = open_production_root();
+    if (root_fd < 0) {
+        (void)memset(uid_text, 0, sizeof(uid_text));
+        return -1;
+    }
+    result = ocra_rate_limit_remove_at(root_fd, uid_text, service, key_id);
     if (close(root_fd) != 0) {
         result = -1;
     }

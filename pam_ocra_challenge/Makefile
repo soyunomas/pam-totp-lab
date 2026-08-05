@@ -17,6 +17,8 @@ RATE_LIMIT_TEST := $(BUILD_DIR)/test_rate_limit
 CONCURRENCY_TEST := $(BUILD_DIR)/test_concurrency
 CLIENT_TEST := $(BUILD_DIR)/test_client
 OCRA_CLIENT := $(BUILD_DIR)/ocra-client
+ENROLL_TEST := $(BUILD_DIR)/test_enroll
+OCRA_ENROLL := $(BUILD_DIR)/ocra-enroll
 SECRET_STORE_PRODUCTION_OBJECTS := $(BUILD_DIR)/scope.production.o \
 	$(BUILD_DIR)/secret_store.production.o
 RATE_LIMIT_PRODUCTION_OBJECTS := $(BUILD_DIR)/scope.production.o \
@@ -29,7 +31,8 @@ DEVICE_TEST_IMAGE ?= postgres:15
 	test-secret-store-device compile-secret-store-production test-rate-limit \
 	test-rate-limit-owner test-concurrency sanitize-rate-limit valgrind-rate-limit \
 	compile-rate-limit-production test-client sanitize-client valgrind-client \
-	gate-05
+	test-enroll sanitize-enroll valgrind-enroll smoke-enroll \
+	compile-enroll-production gate-05 gate-06
 
 test-bootstrap: $(BOOTSTRAP_TEST)
 	$(BOOTSTRAP_TEST)
@@ -52,6 +55,41 @@ test-concurrency: $(CONCURRENCY_TEST)
 
 test-client: $(CLIENT_TEST) $(OCRA_CLIENT)
 	OCRA_CLIENT_BIN="$(abspath $(OCRA_CLIENT))" $(CLIENT_TEST)
+
+test-enroll: $(ENROLL_TEST) $(OCRA_ENROLL)
+	$(ENROLL_TEST)
+
+smoke-enroll: $(OCRA_ENROLL)
+	docker run --rm --network none --cap-drop ALL --pids-limit 64 \
+		--security-opt no-new-privileges --read-only --user 65534:65534 \
+		-v "$(abspath $(OCRA_ENROLL)):/ocra-enroll:ro" \
+		--entrypoint /bin/sh $(DEVICE_TEST_IMAGE) -ec \
+		'! /ocra-enroll inspect --user nobody --service sudo'
+	docker run --rm --network none --cap-drop ALL --cap-add CHOWN \
+		--cap-add DAC_OVERRIDE --pids-limit 64 \
+		--security-opt no-new-privileges --read-only \
+		--tmpfs /etc/security:rw,nosuid,nodev,size=16m,mode=0700 \
+		--tmpfs /run:rw,nosuid,nodev,size=16m,mode=0755 \
+		--tmpfs /client:rw,nosuid,nodev,size=16m,mode=0700 \
+		-v "$(abspath $(OCRA_ENROLL)):/ocra-enroll:ro" \
+		--entrypoint /bin/sh $(DEVICE_TEST_IMAGE) -ec \
+		'uid="$$(id -u nobody)"; gid="$$(id -g nobody)"; \
+		 chmod 0700 /client; chown "$$uid:$$gid" /client; \
+		 /ocra-enroll add --user nobody --service sudo \
+			--client-profile /client/nobody-sudo.conf; \
+		 server="/etc/security/pam-ocra/users/$$uid/sudo.conf"; \
+		 test -f "$$server"; test -f /client/nobody-sudo.conf; \
+		 cmp "$$server" /client/nobody-sudo.conf; \
+		 test "$$(stat -c %a "$$server")" = 600; \
+		 test "$$(stat -c %a /client/nobody-sudo.conf)" = 600; \
+		 test "$$(stat -c %u /client/nobody-sudo.conf)" = "$$uid"; \
+		 metadata="$$(/ocra-enroll inspect --user nobody --service sudo)"; \
+		 case "$$metadata" in \
+			*"uid=$$uid service=sudo enabled=yes key_id="*) ;; *) exit 1 ;; \
+		 esac; \
+		 case "$$metadata" in *secret=*|*suite=*) exit 1 ;; esac; \
+		 /ocra-enroll revoke --user nobody --service sudo; \
+		 test ! -e "$$server"; test -f /client/nobody-sudo.conf'
 
 test-rate-limit-owner: $(RATE_LIMIT_TEST)
 	docker run --rm --network none --cap-drop ALL --cap-add CHOWN \
@@ -143,6 +181,28 @@ $(OCRA_CLIENT): tools/ocra_client.c tools/ocra_client.h ocra_core.c \
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) tools/ocra_client.c \
 		ocra_suite.c secure_memory.c ocra_core.c scope.c secret_store.c -o $@ \
 		-lcrypto $(LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(ENROLL_TEST): tests/test_enroll.c tools/ocra_enroll.c \
+		tools/ocra_enroll.h secret_store.c secret_store.h secure_memory.c \
+		secure_memory.h scope.c scope.h ocra_core.c ocra_core.h ocra_suite.c \
+		ocra_suite.h challenge.c challenge.h rate_limit.c rate_limit.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -DOCRA_TESTING -DOCRA_ENROLL_NO_MAIN $(CFLAGS) \
+		$(CFLAGS_EXTRA) tests/test_enroll.c tools/ocra_enroll.c secret_store.c \
+		secure_memory.c scope.c ocra_core.c ocra_suite.c challenge.c \
+		rate_limit.c -o $@ -lcrypto $(LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(OCRA_ENROLL): tools/ocra_enroll.c tools/ocra_enroll.h secret_store.c \
+		secret_store.h secure_memory.c secure_memory.h scope.c scope.h \
+		ocra_core.c ocra_core.h ocra_suite.c ocra_suite.h challenge.c \
+		challenge.h rate_limit.c rate_limit.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) tools/ocra_enroll.c \
+		secret_store.c secure_memory.c scope.c ocra_core.c ocra_suite.c \
+		challenge.c rate_limit.c -o $@ -lcrypto $(LDFLAGS) \
+		$(LDFLAGS_EXTRA)
+
+compile-enroll-production: $(OCRA_ENROLL)
 
 $(BUILD_DIR)/scope.production.o: scope.c scope.h
 	mkdir -p $(BUILD_DIR)
@@ -271,6 +331,26 @@ gate-05: gate-04
 	$(MAKE) CC=clang BUILD_DIR=build/clang test-client
 	$(MAKE) sanitize-client
 	$(MAKE) valgrind-client
+
+sanitize-enroll:
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) CC=clang BUILD_DIR=build/asan-enroll \
+		CFLAGS_EXTRA='-O1 -fno-omit-frame-pointer -fsanitize=address,undefined' \
+		LDFLAGS_EXTRA='-fsanitize=address,undefined' test-enroll
+
+valgrind-enroll:
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc test-enroll
+	valgrind --leak-check=full --show-leak-kinds=all \
+		--errors-for-leak-kinds=all --error-exitcode=99 \
+		build/gcc/test_enroll
+
+gate-06: gate-05
+	$(MAKE) clean
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc compile-enroll-production test-enroll \
+		smoke-enroll
+	$(MAKE) CC=clang BUILD_DIR=build/clang compile-enroll-production \
+		test-enroll
+	$(MAKE) sanitize-enroll
+	$(MAKE) valgrind-enroll
 
 clean:
 	$(RM) -r build

@@ -14,6 +14,9 @@ int ocra_rate_limit_reserve_at(
 int ocra_rate_limit_reset(uid_t uid, const char *service, const char *key_id);
 int ocra_rate_limit_reset_at(int root_fd, const char *uid_text,
                              const char *service, const char *key_id);
+int ocra_rate_limit_remove(uid_t uid, const char *service, const char *key_id);
+int ocra_rate_limit_remove_at(int root_fd, const char *uid_text,
+                              const char *service, const char *key_id);
 
 #ifdef OCRA_TESTING
 #include <time.h>
