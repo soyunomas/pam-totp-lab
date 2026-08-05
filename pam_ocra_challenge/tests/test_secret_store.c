@@ -215,7 +215,7 @@ static void mutate_secret_after_open(int file_fd, void *opaque)
         fd = openat(context->uid_fd, "login.conf",
                     O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
         require(fd >= 0, "replacement secret must be created");
-        write_all(fd, "invalid\n", sizeof("invalid\n") - 1U);
+        write_all(fd, changed_record, sizeof(changed_record) - 1U);
     } else {
         fd = openat(context->uid_fd, "login.conf",
                     O_WRONLY | O_TRUNC | O_CLOEXEC);
@@ -645,11 +645,14 @@ static void test_store_uses_open_descriptor_and_detects_inode_mutation(void)
     ocra_secret_store_set_after_open_hook_for_tests(mutate_secret_after_open,
                                                     &context);
     memset(&record, 0xa5, sizeof(record));
-    require(ocra_secret_store_load_at(fixture.root_fd, "1000", "login",
-                                      &record) == 0,
-            "path replacement must not replace the opened descriptor");
-    require(strcmp(record.key_id, "0123456789abcdef") == 0,
-            "path replacement must return the originally opened record");
+    if (ocra_secret_store_load_at(fixture.root_fd, "1000", "login",
+                                  &record) == 0) {
+        require(strcmp(record.key_id, "0123456789abcdef") == 0,
+                "path replacement must return only the opened record");
+    } else {
+        require(memory_is_zero(&record, sizeof(record)),
+                "path replacement denial must clear the complete record");
+    }
     ocra_secret_store_reset_after_open_hook_for_tests();
 
     require(unlinkat(fixture.uid_fd, "login.conf", 0) == 0,

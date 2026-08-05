@@ -13,14 +13,20 @@ OCRA_VECTOR_TEST := $(BUILD_DIR)/test_ocra_vectors
 CHALLENGE_TEST := $(BUILD_DIR)/test_challenge
 SECRET_STORE_TEST := $(BUILD_DIR)/test_secret_store
 SECRET_PARSER_FUZZ := $(BUILD_DIR)/fuzz_secret_parser
+RATE_LIMIT_TEST := $(BUILD_DIR)/test_rate_limit
+CONCURRENCY_TEST := $(BUILD_DIR)/test_concurrency
 SECRET_STORE_PRODUCTION_OBJECTS := $(BUILD_DIR)/scope.production.o \
 	$(BUILD_DIR)/secret_store.production.o
+RATE_LIMIT_PRODUCTION_OBJECTS := $(BUILD_DIR)/scope.production.o \
+	$(BUILD_DIR)/challenge.production.o $(BUILD_DIR)/rate_limit.production.o
 DEVICE_TEST_IMAGE ?= postgres:15
 
-.PHONY: clean gate-00 gate-01 gate-02 gate-03 test-bootstrap test-ocra-core \
+.PHONY: clean gate-00 gate-01 gate-02 gate-03 gate-04 test-bootstrap test-ocra-core \
 	test-challenge test-secret-store sanitize-challenge valgrind-challenge \
 	sanitize-secret-store valgrind-secret-store fuzz-secret-parser \
-	test-secret-store-device compile-secret-store-production
+	test-secret-store-device compile-secret-store-production test-rate-limit \
+	test-rate-limit-owner test-concurrency sanitize-rate-limit valgrind-rate-limit \
+	compile-rate-limit-production
 
 test-bootstrap: $(BOOTSTRAP_TEST)
 	$(BOOTSTRAP_TEST)
@@ -35,6 +41,20 @@ test-challenge: $(CHALLENGE_TEST)
 test-secret-store: $(SECRET_STORE_TEST)
 	OCRA_TEST_ALLOW_MKNOD_SKIP=yes $(SECRET_STORE_TEST)
 
+test-rate-limit: $(RATE_LIMIT_TEST)
+	$(RATE_LIMIT_TEST)
+
+test-concurrency: $(CONCURRENCY_TEST)
+	$(CONCURRENCY_TEST)
+
+test-rate-limit-owner: $(RATE_LIMIT_TEST)
+	docker run --rm --network none --cap-drop ALL --cap-add CHOWN \
+		--security-opt no-new-privileges --read-only \
+		--tmpfs /tmp:rw,nosuid,size=16m,mode=1777 \
+		-e OCRA_TEST_REQUIRE_OWNER_MISMATCH=yes \
+		-v "$(abspath $(RATE_LIMIT_TEST)):/test_rate_limit:ro" \
+		$(DEVICE_TEST_IMAGE) /test_rate_limit
+
 test-secret-store-device: $(SECRET_STORE_TEST)
 	docker run --rm --network none --cap-drop ALL --cap-add MKNOD \
 		--security-opt no-new-privileges --read-only \
@@ -43,6 +63,8 @@ test-secret-store-device: $(SECRET_STORE_TEST)
 		$(DEVICE_TEST_IMAGE) /test_secret_store
 
 compile-secret-store-production: $(SECRET_STORE_PRODUCTION_OBJECTS)
+
+compile-rate-limit-production: $(RATE_LIMIT_PRODUCTION_OBJECTS)
 
 fuzz-secret-parser: $(SECRET_PARSER_FUZZ)
 	$(SECRET_PARSER_FUZZ)
@@ -85,6 +107,20 @@ $(SECRET_PARSER_FUZZ): tests/fuzz_secret_parser.c scope.c secret_store.c \
 		tests/fuzz_secret_parser.c scope.c secret_store.c secure_memory.c -o $@ \
 		-lcrypto $(LDFLAGS) $(LDFLAGS_EXTRA)
 
+$(RATE_LIMIT_TEST): tests/test_rate_limit.c rate_limit.c rate_limit.h scope.c \
+		scope.h challenge.c challenge.h secret_store.h ocra_core.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -DOCRA_TESTING $(CFLAGS) $(CFLAGS_EXTRA) \
+		tests/test_rate_limit.c rate_limit.c scope.c challenge.c -o $@ \
+		$(LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(CONCURRENCY_TEST): tests/test_concurrency.c rate_limit.c rate_limit.h \
+		scope.c scope.h challenge.c challenge.h secret_store.h ocra_core.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -DOCRA_TESTING $(CFLAGS) $(CFLAGS_EXTRA) \
+		tests/test_concurrency.c rate_limit.c scope.c challenge.c -o $@ \
+		$(LDFLAGS) $(LDFLAGS_EXTRA)
+
 $(BUILD_DIR)/scope.production.o: scope.c scope.h
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -c scope.c -o $@
@@ -93,6 +129,15 @@ $(BUILD_DIR)/secret_store.production.o: secret_store.c secret_store.h scope.h \
 		secure_memory.h
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -c secret_store.c -o $@
+
+$(BUILD_DIR)/challenge.production.o: challenge.c challenge.h ocra_core.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -c challenge.c -o $@
+
+$(BUILD_DIR)/rate_limit.production.o: rate_limit.c rate_limit.h scope.h \
+		challenge.h secret_store.h ocra_core.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -c rate_limit.c -o $@
 
 gate-00:
 	$(MAKE) -C ../tests verify
@@ -155,6 +200,33 @@ gate-03: gate-02
 	$(MAKE) sanitize-secret-store
 	$(MAKE) valgrind-secret-store
 	$(MAKE) CC=gcc BUILD_DIR=build/fuzz fuzz-secret-parser
+
+sanitize-rate-limit:
+	$(MAKE) CC=clang BUILD_DIR=build/asan-rate-limit \
+		CFLAGS_EXTRA='-O1 -fno-omit-frame-pointer -fsanitize=address,undefined' \
+		LDFLAGS_EXTRA='-fsanitize=address,undefined' \
+		test-rate-limit test-concurrency
+
+valgrind-rate-limit:
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc test-rate-limit test-concurrency
+	valgrind --leak-check=full --show-leak-kinds=all \
+		--errors-for-leak-kinds=all --error-exitcode=99 \
+		build/gcc/test_rate_limit
+	valgrind --leak-check=full --show-leak-kinds=all \
+		--errors-for-leak-kinds=all --error-exitcode=99 \
+		build/gcc/test_concurrency
+
+gate-04: gate-03
+	$(MAKE) clean
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc-production \
+		compile-rate-limit-production
+	$(MAKE) CC=clang BUILD_DIR=build/clang-production \
+		compile-rate-limit-production
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc test-rate-limit test-concurrency
+	$(MAKE) CC=clang BUILD_DIR=build/clang test-rate-limit test-concurrency
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc test-rate-limit-owner
+	$(MAKE) sanitize-rate-limit
+	$(MAKE) valgrind-rate-limit
 
 clean:
 	$(RM) -r build
