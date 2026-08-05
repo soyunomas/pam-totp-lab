@@ -15,6 +15,8 @@ SECRET_STORE_TEST := $(BUILD_DIR)/test_secret_store
 SECRET_PARSER_FUZZ := $(BUILD_DIR)/fuzz_secret_parser
 RATE_LIMIT_TEST := $(BUILD_DIR)/test_rate_limit
 CONCURRENCY_TEST := $(BUILD_DIR)/test_concurrency
+CLIENT_TEST := $(BUILD_DIR)/test_client
+OCRA_CLIENT := $(BUILD_DIR)/ocra-client
 SECRET_STORE_PRODUCTION_OBJECTS := $(BUILD_DIR)/scope.production.o \
 	$(BUILD_DIR)/secret_store.production.o
 RATE_LIMIT_PRODUCTION_OBJECTS := $(BUILD_DIR)/scope.production.o \
@@ -26,7 +28,8 @@ DEVICE_TEST_IMAGE ?= postgres:15
 	sanitize-secret-store valgrind-secret-store fuzz-secret-parser \
 	test-secret-store-device compile-secret-store-production test-rate-limit \
 	test-rate-limit-owner test-concurrency sanitize-rate-limit valgrind-rate-limit \
-	compile-rate-limit-production
+	compile-rate-limit-production test-client sanitize-client valgrind-client \
+	gate-05
 
 test-bootstrap: $(BOOTSTRAP_TEST)
 	$(BOOTSTRAP_TEST)
@@ -46,6 +49,9 @@ test-rate-limit: $(RATE_LIMIT_TEST)
 
 test-concurrency: $(CONCURRENCY_TEST)
 	$(CONCURRENCY_TEST)
+
+test-client: $(CLIENT_TEST) $(OCRA_CLIENT)
+	OCRA_CLIENT_BIN="$(abspath $(OCRA_CLIENT))" $(CLIENT_TEST)
 
 test-rate-limit-owner: $(RATE_LIMIT_TEST)
 	docker run --rm --network none --cap-drop ALL --cap-add CHOWN \
@@ -120,6 +126,23 @@ $(CONCURRENCY_TEST): tests/test_concurrency.c rate_limit.c rate_limit.h \
 	$(CC) $(CPPFLAGS) -DOCRA_TESTING $(CFLAGS) $(CFLAGS_EXTRA) \
 		tests/test_concurrency.c rate_limit.c scope.c challenge.c -o $@ \
 		$(LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(CLIENT_TEST): tests/test_client.c tools/ocra_client.c tools/ocra_client.h \
+		challenge.c challenge.h ocra_core.c ocra_core.h ocra_suite.c ocra_suite.h secret_store.c \
+		secret_store.h secure_memory.c secure_memory.h scope.c scope.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -DOCRA_TESTING -DOCRA_CLIENT_NO_MAIN $(CFLAGS) \
+		$(CFLAGS_EXTRA) tests/test_client.c tools/ocra_client.c challenge.c ocra_suite.c \
+		secure_memory.c ocra_core.c scope.c secret_store.c -o $@ -lcrypto \
+		$(LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(OCRA_CLIENT): tools/ocra_client.c tools/ocra_client.h ocra_core.c \
+		ocra_core.h ocra_suite.c ocra_suite.h secret_store.c secret_store.h \
+		secure_memory.c secure_memory.h scope.c scope.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) tools/ocra_client.c \
+		ocra_suite.c secure_memory.c ocra_core.c scope.c secret_store.c -o $@ \
+		-lcrypto $(LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(BUILD_DIR)/scope.production.o: scope.c scope.h
 	mkdir -p $(BUILD_DIR)
@@ -216,6 +239,20 @@ valgrind-rate-limit:
 		--errors-for-leak-kinds=all --error-exitcode=99 \
 		build/gcc/test_concurrency
 
+sanitize-client:
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) CC=clang BUILD_DIR=build/asan-client \
+		CFLAGS_EXTRA='-O1 -fno-omit-frame-pointer -fsanitize=address,undefined' \
+		LDFLAGS_EXTRA='-fsanitize=address,undefined' test-client
+
+valgrind-client:
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc test-client
+	OCRA_CLIENT_BIN="$(abspath build/gcc/ocra-client)" valgrind \
+		--trace-children=yes \
+		--log-file=build/gcc/valgrind-client.%p.log \
+		--leak-check=full --show-leak-kinds=all \
+		--errors-for-leak-kinds=all --error-exitcode=99 build/gcc/test_client
+	cat build/gcc/valgrind-client.*.log
+
 gate-04: gate-03
 	$(MAKE) clean
 	$(MAKE) CC=gcc BUILD_DIR=build/gcc-production \
@@ -227,6 +264,13 @@ gate-04: gate-03
 	$(MAKE) CC=gcc BUILD_DIR=build/gcc test-rate-limit-owner
 	$(MAKE) sanitize-rate-limit
 	$(MAKE) valgrind-rate-limit
+
+gate-05: gate-04
+	$(MAKE) clean
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc test-client
+	$(MAKE) CC=clang BUILD_DIR=build/clang test-client
+	$(MAKE) sanitize-client
+	$(MAKE) valgrind-client
 
 clean:
 	$(RM) -r build

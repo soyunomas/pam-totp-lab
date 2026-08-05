@@ -242,7 +242,7 @@ static int ocra_key_id_is_valid(const unsigned char *value, size_t length)
     return 1;
 }
 
-static int ocra_parse_record(const unsigned char *data, size_t length,
+int ocra_secret_record_parse(const unsigned char *data, size_t length,
                              struct ocra_secret_record *record)
 {
     static const unsigned int field_order[] = {
@@ -469,7 +469,7 @@ int ocra_secret_store_load_at(int root_fd, const char *uid_text,
     if (ocra_validate_file_metadata(file_fd, &final_status) != 0 ||
         !ocra_file_metadata_unchanged(&initial_status, &final_status) ||
         length > OCRA_SECRET_FILE_MAX ||
-        ocra_parse_record(buffer, length, record) != 0) {
+        ocra_secret_record_parse(buffer, length, record) != 0) {
         goto cleanup;
     }
     result = 0;
@@ -495,7 +495,7 @@ cleanup:
 int ocra_secret_store_parse_for_tests(const unsigned char *data, size_t length,
                                       struct ocra_secret_record *record)
 {
-    return ocra_parse_record(data, length, record);
+    return ocra_secret_record_parse(data, length, record);
 }
 
 void ocra_secret_store_set_after_open_hook_for_tests(

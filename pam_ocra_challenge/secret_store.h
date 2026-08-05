@@ -15,6 +15,8 @@ struct ocra_secret_record {
 };
 
 void ocra_secret_record_clear(struct ocra_secret_record *record);
+int ocra_secret_record_parse(const unsigned char *data, size_t length,
+                             struct ocra_secret_record *record);
 int ocra_secret_store_load(uid_t uid, const char *service,
                            struct ocra_secret_record *record);
 int ocra_secret_store_load_at(int root_fd, const char *uid_text,
