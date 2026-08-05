@@ -1,4 +1,4 @@
-Fase activa: 1
-Última puerta superada: gate-00
-Commit base: 9288f49adbbe554d37243989d87c9b9c19b7360e
+Fase activa: 2
+Última puerta superada: gate-01
+Commit base: 66b47ccb12e30d52a46e4a3620fab597739d8a83
 Estado: EN_PROGRESO
