@@ -6,12 +6,13 @@ Colección experimental y educativa de módulos **PAM (Pluggable Authentication 
 
 ## Resumen de implementaciones
 
-El repositorio contiene doce implementaciones. Todas disponen de un directorio propio y documentación específica.
+El repositorio contiene doce implementaciones PAM y una herramienta auxiliar de enrolamiento TOTP. Todas disponen de un directorio propio y documentación específica.
 
 | Implementación | Descripción breve | Documentación |
 | :--- | :--- | :--- |
 | `pam-sandwich` | Combina TOTP y contraseña en un único campo de entrada. | [README](./pam-sandwich/README.md) |
 | `pam_strict_totp` | Implementa TOTP clásico endurecido con antirreplay local. | [README](./pam_strict_totp/README.md) |
+| `pam_totp_enroll` | Enrola por CLI una app TOTP mediante QR y valida el primer código antes de guardar el secreto. | [README](./pam_totp_enroll/README.md) |
 | `pam_totp_domains` | Usa un secreto TOTP distinto según el servicio PAM. | [README](./pam_totp_domains/README.md) |
 | `pam_totp_shuffle` | Solicita los dígitos TOTP en un orden aleatorio. | [README](./pam_totp_shuffle/README.md) |
 | `pam_totp_slot_challenge` | Selecciona aleatoriamente uno de varios secretos TOTP. | [README](./pam_totp_slot_challenge/README.md) |
@@ -40,6 +41,27 @@ Implementación endurecida del desafío TOTP clásico.
 - Contraseña y TOTP en prompts separados.
 - Fail-closed, limpieza de memoria y antirreplay local.
 - [Documentación](./pam_strict_totp/README.md)
+
+### Herramienta auxiliar: `pam_totp_enroll`
+
+Herramienta de línea de comandos para provisionar una aplicación TOTP compatible con los módulos que leen `~/.google_authenticator`, especialmente `pam_strict_totp`.
+
+- Genera una semilla Base32 de 160 bits con el CSPRNG del sistema.
+- Construye un URI estándar `otpauth://` con SHA-1, 6 dígitos y periodo de 30 segundos.
+- Renderiza el QR directamente en la terminal mediante `qrencode`.
+- Envía el URI a `qrencode` por `stdin`, evitando exponer la semilla en la línea de comandos del proceso.
+- Exige un primer código TOTP válido antes de persistir la semilla.
+- Escribe el secreto de forma atómica con permisos `0600` y rechaza sobrescrituras accidentales salvo `--force`.
+- [Documentación](./pam_totp_enroll/README.md)
+
+Uso básico:
+
+```bash
+cd pam_totp_enroll
+make deps
+make verify
+python3 pam_totp_enroll.py --issuer "Linux Mint" --account "$USER"
+```
 
 ### 3. `pam_totp_domains`
 
@@ -141,6 +163,7 @@ Aplica un horario por cuenta y solicita tres posiciones de una clave docente fue
 | :--- | :--- | :--- | :--- |
 | `pam-sandwich` | TOTP combinado | Un prompt | Compatibilidad con clientes limitados |
 | `pam_strict_totp` | TOTP | Prompt TOTP estándar | Fuerza bruta y repetición |
+| `pam_totp_enroll` | Enrolamiento TOTP | QR + verificación inicial | Provisionamiento local seguro de la semilla |
 | `pam_totp_domains` | TOTP por servicio | Prompt del dominio | Compromiso transversal de un secreto |
 | `pam_totp_shuffle` | TOTP permutado | Desafío de orden | Observación parcial de la entrada |
 | `pam_totp_slot_challenge` | Varios TOTP | Un slot aleatorio | Compromiso aislado de un secreto |
@@ -158,7 +181,7 @@ En Debian o Ubuntu:
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential clang libpam0g-dev liboath-dev libssl-dev valgrind binutils
+sudo apt install -y build-essential clang libpam0g-dev liboath-dev libssl-dev valgrind binutils qrencode python3
 ```
 
 Verificación general del repositorio:
@@ -170,6 +193,7 @@ make -C tests verify
 Puertas específicas disponibles cuando la carpeta correspondiente está presente:
 
 ```bash
+make -C pam_totp_enroll verify
 make -C pam_totp_domains verify
 make -C pam_totp_shuffle verify
 make -C pam_totp_slot_challenge verify
