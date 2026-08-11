@@ -16,6 +16,12 @@ void main() {
     expect(profile.identity, 'alice@server.example/sshd');
   });
 
+  test('accepts terminal whitespace around a scanned enrollment URI', () {
+    final profile = OcraProfile.parseEnrollmentUri('  $validEnrollmentUri\n');
+
+    expect(profile.identity, 'alice@server.example/sshd');
+  });
+
   test('rejects duplicate or missing enrollment fields', () {
     expect(
       () => OcraProfile.parseEnrollmentUri('$validEnrollmentUri&service=sudo'),

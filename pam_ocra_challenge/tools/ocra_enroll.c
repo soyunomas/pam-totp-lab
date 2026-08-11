@@ -871,7 +871,6 @@ static int render_qr(const char *uri, FILE *output)
     }
     (void)close(descriptors[0]);
     if (write_all(descriptors[1], uri, strlen(uri)) == 0 &&
-        write_all(descriptors[1], "\n", 1U) == 0 &&
         close(descriptors[1]) == 0) {
         descriptors[1] = -1;
         do {

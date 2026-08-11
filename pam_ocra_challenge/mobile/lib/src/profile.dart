@@ -13,7 +13,7 @@ class OcraProfile {
   });
 
   factory OcraProfile.parseEnrollmentUri(String input) {
-    final uri = Uri.tryParse(input);
+    final uri = Uri.tryParse(input.trim());
     const requiredFields = {
       'v',
       'host',
