@@ -13,7 +13,11 @@ enum ocra_enroll_fault_operation {
     OCRA_ENROLL_FAULT_INTERRUPT_AFTER_ADD_SERVER,
     OCRA_ENROLL_FAULT_INTERRUPT_REVOKE,
     OCRA_ENROLL_FAULT_INTERRUPT_PREPARE,
-    OCRA_ENROLL_FAULT_INTERRUPT_RECOVERY
+    OCRA_ENROLL_FAULT_INTERRUPT_RECOVERY,
+    OCRA_ENROLL_FAULT_ADMIN_FSYNC,
+    OCRA_ENROLL_FAULT_ADMIN_UNLOCK,
+    OCRA_ENROLL_FAULT_INTERRUPT_STAGE_WRITE,
+    OCRA_ENROLL_FAULT_INTERRUPT_STAGE_FSYNC
 };
 
 #ifdef OCRA_TESTING
@@ -34,6 +38,11 @@ void ocra_enroll_set_user_provider_for_tests(ocra_enroll_user_provider provider)
 void ocra_enroll_set_euid_for_tests(uid_t euid);
 void ocra_enroll_set_fault_for_tests(enum ocra_enroll_fault_operation operation,
                                      unsigned int occurrence);
+unsigned int ocra_enroll_get_fault_seen_for_tests(void);
+void ocra_enroll_reset_lock_cleanup_counts_for_tests(void);
+void ocra_enroll_get_lock_cleanup_counts_for_tests(unsigned int *fsync_calls,
+                                                   unsigned int *unlock_calls,
+                                                   unsigned int *close_calls);
 void ocra_enroll_reset_test_providers(void);
 #endif
 

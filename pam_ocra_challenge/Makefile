@@ -31,7 +31,7 @@ DEVICE_TEST_IMAGE ?= postgres:15
 	test-secret-store-device compile-secret-store-production test-rate-limit \
 	test-rate-limit-owner test-concurrency sanitize-rate-limit valgrind-rate-limit \
 	compile-rate-limit-production test-client sanitize-client valgrind-client \
-	test-enroll sanitize-enroll valgrind-enroll smoke-enroll \
+	test-enroll test-enroll-owner sanitize-enroll valgrind-enroll smoke-enroll \
 	compile-enroll-production gate-05 gate-06
 
 test-bootstrap: $(BOOTSTRAP_TEST)
@@ -58,6 +58,15 @@ test-client: $(CLIENT_TEST) $(OCRA_CLIENT)
 
 test-enroll: $(ENROLL_TEST) $(OCRA_ENROLL)
 	$(ENROLL_TEST)
+
+test-enroll-owner: $(ENROLL_TEST)
+	docker run --rm --network none --cap-drop ALL --cap-add CHOWN \
+		--cap-add DAC_OVERRIDE --cap-add FOWNER --pids-limit 64 \
+		--security-opt no-new-privileges --read-only \
+		--tmpfs /tmp:rw,nosuid,nodev,size=64m,mode=1777 \
+		-e OCRA_TEST_REQUIRE_ENROLL_OWNER_MISMATCH=yes \
+		-v "$(abspath $(ENROLL_TEST)):/test_enroll:ro" \
+		$(DEVICE_TEST_IMAGE) /test_enroll
 
 smoke-enroll: $(OCRA_ENROLL)
 	docker run --rm --network none --cap-drop ALL --pids-limit 64 \
@@ -346,7 +355,7 @@ valgrind-enroll:
 gate-06: gate-05
 	$(MAKE) clean
 	$(MAKE) CC=gcc BUILD_DIR=build/gcc compile-enroll-production test-enroll \
-		smoke-enroll
+		test-enroll-owner smoke-enroll
 	$(MAKE) CC=clang BUILD_DIR=build/clang compile-enroll-production \
 		test-enroll
 	$(MAKE) sanitize-enroll

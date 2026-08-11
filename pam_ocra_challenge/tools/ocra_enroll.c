@@ -10,6 +10,7 @@
 #include "../secure_memory.h"
 
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <inttypes.h>
@@ -26,12 +27,15 @@
 #include <unistd.h>
 
 #include <openssl/crypto.h>
+#include <openssl/evp.h>
 
 #define OCRA_RECORD_CAPACITY 256U
 #define OCRA_KEY_ID_RANDOM_BYTES 8U
 #define OCRA_TRANSACTION_ID_BYTES 8U
 #define OCRA_JOURNAL_CAPACITY (PATH_MAX * 2U + 2048U)
 #define OCRA_ADMIN_JOURNAL_NAME "admin.txn"
+#define OCRA_STAGE_INTERRUPTED (-2)
+#define OCRA_DIGEST_HEX_LENGTH 64U
 
 struct enroll_target {
     int directory_fd;
@@ -39,6 +43,13 @@ struct enroll_target {
     ino_t inode;
     char name[NAME_MAX + 1U];
     char path[PATH_MAX];
+};
+
+struct enroll_txn_directory {
+    int fd;
+    dev_t device;
+    ino_t inode;
+    char name[NAME_MAX + 1U];
 };
 
 #ifdef OCRA_TESTING
@@ -49,6 +60,9 @@ static int test_euid_is_set;
 static enum ocra_enroll_fault_operation test_fault_operation;
 static unsigned int test_fault_occurrence;
 static unsigned int test_fault_seen;
+static unsigned int test_lock_fsync_calls;
+static unsigned int test_lock_unlock_calls;
+static unsigned int test_lock_close_calls;
 #endif
 
 static int inject_fault(enum ocra_enroll_fault_operation operation)
@@ -199,6 +213,18 @@ static int path_matches_fd(int directory_fd, const char *name, int fd)
            S_ISREG(path_status.st_mode);
 }
 
+static int directory_path_matches_fd(int parent_fd, const char *name, int fd)
+{
+    struct stat path_status;
+    struct stat fd_status;
+
+    return fstat(fd, &fd_status) == 0 && S_ISDIR(fd_status.st_mode) &&
+           fstatat(parent_fd, name, &path_status, AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISDIR(path_status.st_mode) &&
+           path_status.st_dev == fd_status.st_dev &&
+           path_status.st_ino == fd_status.st_ino;
+}
+
 static int normalize_created(int fd, mode_t mode, uid_t uid, gid_t gid)
 {
     return fchmod(fd, mode) == 0 && fchown(fd, uid, gid) == 0 ? 0 : -1;
@@ -286,6 +312,33 @@ static int open_admin_lock(int root_fd)
         return -1;
     }
     return fd;
+}
+
+static int finalize_admin_fsync(int root_fd)
+{
+#ifdef OCRA_TESTING
+    ++test_lock_fsync_calls;
+#endif
+    return inject_fault(OCRA_ENROLL_FAULT_ADMIN_FSYNC) != 0 ? -1
+                                                            : fsync(root_fd);
+}
+
+static int finalize_admin_unlock(int lock_fd)
+{
+#ifdef OCRA_TESTING
+    ++test_lock_unlock_calls;
+#endif
+    return inject_fault(OCRA_ENROLL_FAULT_ADMIN_UNLOCK) != 0
+               ? -1
+               : flock(lock_fd, LOCK_UN);
+}
+
+static int finalize_admin_close(int lock_fd)
+{
+#ifdef OCRA_TESTING
+    ++test_lock_close_calls;
+#endif
+    return close(lock_fd);
 }
 
 static int open_server_scope(int root_fd, const char *uid_text)
@@ -489,34 +542,216 @@ static int enroll_rename(int old_directory_fd, const char *old_name,
                           new_name);
 }
 
+static int fd_contents_match(int fd, const unsigned char *expected,
+                             size_t expected_length)
+{
+    unsigned char buffer[OCRA_JOURNAL_CAPACITY + 1U];
+    size_t offset = 0U;
+    int result = 0;
+
+    if (expected_length > sizeof(buffer) - 1U) {
+        return 0;
+    }
+    (void)memset(buffer, 0, sizeof(buffer));
+    while (offset < expected_length + 1U) {
+        ssize_t count = pread(fd, buffer + offset,
+                              expected_length + 1U - offset, (off_t)offset);
+
+        if (count > 0) {
+            offset += (size_t)count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    if (offset == expected_length &&
+        CRYPTO_memcmp(buffer, expected, expected_length) == 0) {
+        result = 1;
+    }
+    secure_memory_clear(buffer, sizeof(buffer));
+    return result;
+}
+
 static int stage_record(int directory_fd, const char *name, uid_t uid,
                         gid_t gid, const unsigned char *record,
                         size_t record_length)
 {
     int fd = openat(directory_fd, name,
-                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                    O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
                     0600);
     int result = -1;
+    int preserve_partial = 0;
 
     if (fd < 0) {
         return -1;
     }
-    if (normalize_created(fd, 0600, uid, gid) == 0 &&
+    if (fchmod(fd, 0600) != 0 ||
+        !metadata_is_file(fd, server_owner_uid(), server_owner_gid()) ||
+        !path_matches_fd(directory_fd, name, fd)) {
+        goto close_file;
+    }
+    if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_STAGE_WRITE) != 0) {
+        size_t partial = record_length / 2U;
+
+        if (partial > 0U && system_write_complete(fd, record, partial) != 0) {
+            goto close_file;
+        }
+        preserve_partial = 1;
+        result = OCRA_STAGE_INTERRUPTED;
+        goto close_file;
+    }
+    if (enroll_write_complete(fd, record, record_length) != 0) {
+        goto close_file;
+    }
+    if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_STAGE_FSYNC) != 0) {
+        preserve_partial = 1;
+        result = OCRA_STAGE_INTERRUPTED;
+        goto close_file;
+    }
+    if (enroll_fsync_file(fd) != 0 ||
+        !fd_contents_match(fd, record, record_length) ||
+        !path_matches_fd(directory_fd, name, fd) ||
+        normalize_created(fd, 0600, uid, gid) != 0 ||
+        !metadata_is_file(fd, uid, gid) ||
+        !path_matches_fd(directory_fd, name, fd)) {
+        goto close_file;
+    }
+    if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_STAGE_FSYNC) != 0) {
+        preserve_partial = 1;
+        result = OCRA_STAGE_INTERRUPTED;
+        goto close_file;
+    }
+    if (enroll_fsync_file(fd) == 0 &&
+        fd_contents_match(fd, record, record_length) &&
         metadata_is_file(fd, uid, gid) &&
-        path_matches_fd(directory_fd, name, fd) &&
-        enroll_write_complete(fd, record, record_length) == 0 &&
-        enroll_fsync_file(fd) == 0) {
+        path_matches_fd(directory_fd, name, fd)) {
         result = 0;
     }
+
+close_file:
     if (close(fd) != 0) {
         result = -1;
     }
     if (result == 0 && enroll_fsync_directory(directory_fd) != 0) {
         result = -1;
     }
-    if (result != 0) {
+    if (result != 0 && preserve_partial == 0) {
         (void)unlinkat(directory_fd, name, 0);
         (void)fsync(directory_fd);
+    }
+    return result;
+}
+
+static int format_transaction_directory_name(
+    char output[NAME_MAX + 1U], const char *transaction_id)
+{
+    int count = snprintf(output, NAME_MAX + 1U, ".ocra-admin-%s",
+                         transaction_id);
+
+    return count > 0 && count <= NAME_MAX ? 0 : -1;
+}
+
+static int load_transaction_directory_identity(
+    int parent_fd, struct enroll_txn_directory *transaction)
+{
+    struct stat status;
+
+    if (transaction->fd < 0 ||
+        !metadata_is_directory(transaction->fd, server_owner_uid(),
+                               server_owner_gid(), 1) ||
+        !directory_path_matches_fd(parent_fd, transaction->name,
+                                   transaction->fd) ||
+        fstat(transaction->fd, &status) != 0) {
+        return -1;
+    }
+    transaction->device = status.st_dev;
+    transaction->inode = status.st_ino;
+    return 0;
+}
+
+static int create_transaction_directory(
+    int parent_fd, const char *transaction_id,
+    struct enroll_txn_directory *transaction)
+{
+    int created = 0;
+    int result = -1;
+
+    (void)memset(transaction, 0, sizeof(*transaction));
+    transaction->fd = -1;
+    if (format_transaction_directory_name(transaction->name,
+                                          transaction_id) != 0 ||
+        mkdirat(parent_fd, transaction->name, 0700) != 0) {
+        return -1;
+    }
+    created = 1;
+    transaction->fd = openat(parent_fd, transaction->name,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (transaction->fd < 0 ||
+        normalize_created(transaction->fd, 0700, server_owner_uid(),
+                          server_owner_gid()) != 0 ||
+        load_transaction_directory_identity(parent_fd, transaction) != 0 ||
+        enroll_fsync_directory(transaction->fd) != 0 ||
+        enroll_fsync_directory(parent_fd) != 0) {
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    if (result != 0 && transaction->fd >= 0) {
+        (void)close(transaction->fd);
+        transaction->fd = -1;
+    }
+    if (result != 0 && created != 0) {
+        /* Recovery owns a safely created directory once the journal exists. */
+    }
+    return result;
+}
+
+static int open_transaction_directory(
+    int parent_fd, const char *name, dev_t expected_device,
+    ino_t expected_inode, struct enroll_txn_directory *transaction)
+{
+    (void)memset(transaction, 0, sizeof(*transaction));
+    transaction->fd = -1;
+    if (name == NULL || !component_is_safe(name, strlen(name)) ||
+        snprintf(transaction->name, sizeof(transaction->name), "%s", name) <
+            0) {
+        return -1;
+    }
+    transaction->fd = openat(parent_fd, name,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (transaction->fd < 0 && errno == ENOENT) {
+        return 1;
+    }
+    if (transaction->fd < 0 ||
+        load_transaction_directory_identity(parent_fd, transaction) != 0 ||
+        ((expected_device != (dev_t)0 || expected_inode != (ino_t)0) &&
+         (transaction->device != expected_device ||
+          transaction->inode != expected_inode))) {
+        if (transaction->fd >= 0) {
+            (void)close(transaction->fd);
+            transaction->fd = -1;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static int remove_transaction_directory(
+    int parent_fd, struct enroll_txn_directory *transaction)
+{
+    int result = -1;
+
+    if (transaction->fd < 0 ||
+        load_transaction_directory_identity(parent_fd, transaction) != 0 ||
+        close(transaction->fd) != 0) {
+        return -1;
+    }
+    transaction->fd = -1;
+    if (unlinkat(parent_fd, transaction->name, AT_REMOVEDIR) == 0 &&
+        enroll_fsync_directory(parent_fd) == 0) {
+        result = 0;
     }
     return result;
 }
@@ -723,7 +958,8 @@ static int read_journal_header(int server_root_fd, char operation[8U],
          strcmp(operation, "revoke") == 0) &&
         (strcmp(phase, "preparing") == 0 ||
          strcmp(phase, "prepared") == 0 ||
-         strcmp(phase, "committing") == 0)) {
+         strcmp(phase, "committing") == 0 ||
+         strcmp(phase, "cleanup") == 0)) {
         result = 0;
     }
 
@@ -869,6 +1105,73 @@ static int serialize_record(const struct ocra_secret_record *source,
     return 0;
 }
 
+static int digest_bytes(const unsigned char *data, size_t length,
+                        char output[OCRA_DIGEST_HEX_LENGTH + 1U])
+{
+    static const char hexadecimal[] = "0123456789abcdef";
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_length = 0U;
+    size_t index;
+    int result = -1;
+
+    (void)memset(digest, 0, sizeof(digest));
+    (void)memset(output, 0, OCRA_DIGEST_HEX_LENGTH + 1U);
+    if (data != NULL &&
+        EVP_Digest(data, length, digest, &digest_length, EVP_sha256(), NULL) ==
+            1 &&
+        digest_length == OCRA_DIGEST_HEX_LENGTH / 2U) {
+        for (index = 0U; index < digest_length; ++index) {
+            output[index * 2U] = hexadecimal[digest[index] >> 4U];
+            output[index * 2U + 1U] = hexadecimal[digest[index] & 0x0fU];
+        }
+        output[OCRA_DIGEST_HEX_LENGTH] = '\0';
+        result = 0;
+    }
+    secure_memory_clear(digest, sizeof(digest));
+    return result;
+}
+
+static int read_record_at(int directory_fd, const char *name, uid_t uid,
+                          gid_t gid, struct ocra_secret_record *record);
+
+static int record_matches_digest(const struct ocra_secret_record *record,
+                                 const char *expected_key,
+                                 const char *expected_digest)
+{
+    unsigned char serialized[OCRA_RECORD_CAPACITY];
+    char digest[OCRA_DIGEST_HEX_LENGTH + 1U];
+    size_t serialized_length = 0U;
+    int matches = 0;
+
+    (void)memset(serialized, 0, sizeof(serialized));
+    (void)memset(digest, 0, sizeof(digest));
+    if (record != NULL && expected_key != NULL && expected_digest != NULL &&
+        strcmp(record->key_id, expected_key) == 0 &&
+        serialize_record(record, serialized, &serialized_length) == 0 &&
+        digest_bytes(serialized, serialized_length, digest) == 0 &&
+        CRYPTO_memcmp(digest, expected_digest, OCRA_DIGEST_HEX_LENGTH) == 0) {
+        matches = 1;
+    }
+    secure_memory_clear(digest, sizeof(digest));
+    secure_memory_clear(serialized, sizeof(serialized));
+    return matches;
+}
+
+static int target_matches_digest_at(int directory_fd, const char *name,
+                                    uid_t uid, gid_t gid,
+                                    const char *expected_key,
+                                    const char *expected_digest)
+{
+    struct ocra_secret_record record;
+    int matches;
+
+    ocra_secret_record_clear(&record);
+    matches = read_record_at(directory_fd, name, uid, gid, &record) == 0 &&
+              record_matches_digest(&record, expected_key, expected_digest);
+    ocra_secret_record_clear(&record);
+    return matches;
+}
+
 static int read_record_at(int directory_fd, const char *name, uid_t uid,
                           gid_t gid, struct ocra_secret_record *record)
 {
@@ -924,10 +1227,13 @@ static int records_match(const struct ocra_secret_record *left,
 
 static int record_artifact_state(int directory_fd, const char *name,
                                  uid_t uid, gid_t gid,
-                                 const char *expected_key, int *exists)
+                                 const char *expected_key,
+                                 const char *expected_digest,
+                                 int allow_partial, int *exists)
 {
     struct ocra_secret_record record;
     struct stat status;
+    int fd = -1;
     int result = -1;
 
     ocra_secret_record_clear(&record);
@@ -936,14 +1242,28 @@ static int record_artifact_state(int directory_fd, const char *name,
         result = errno == ENOENT ? 0 : -1;
         goto cleanup;
     }
-    if (read_record_at(directory_fd, name, uid, gid, &record) != 0 ||
-        strcmp(record.key_id, expected_key) != 0) {
+    if (read_record_at(directory_fd, name, uid, gid, &record) == 0 &&
+        record_matches_digest(&record, expected_key, expected_digest)) {
+        *exists = 1;
+        result = 0;
         goto cleanup;
     }
-    *exists = 1;
-    result = 0;
+    if (allow_partial != 0) {
+        fd = openat(directory_fd, name,
+                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (fd >= 0 &&
+            (metadata_is_file(fd, server_owner_uid(), server_owner_gid()) ||
+             metadata_is_file(fd, uid, gid)) &&
+            path_matches_fd(directory_fd, name, fd)) {
+            *exists = 1;
+            result = 0;
+        }
+    }
 
 cleanup:
+    if (fd >= 0 && close(fd) != 0) {
+        result = -1;
+    }
     ocra_secret_record_clear(&record);
     return result;
 }
@@ -983,8 +1303,9 @@ static int remove_staged(int directory_fd, const char *name, int *exists)
     return 0;
 }
 
-static int restore_backup(int directory_fd, const char *backup,
-                          const char *target, uid_t uid, gid_t gid,
+static int restore_backup(int artifact_directory_fd, const char *backup,
+                          int target_directory_fd, const char *target,
+                          uid_t uid, gid_t gid,
                           const struct ocra_secret_record *expected,
                           const char *replacement_key,
                           const char *transaction_id,
@@ -997,6 +1318,7 @@ static int restore_backup(int directory_fd, const char *backup,
     size_t serialized_length = 0U;
     struct stat status;
     int restore_exists = 0;
+    int stage_status;
     int result = -1;
 
     ocra_secret_record_clear(&record);
@@ -1006,11 +1328,11 @@ static int restore_backup(int directory_fd, const char *backup,
     if (*backup_exists == 0) {
         goto cleanup;
     }
-    if (read_record_at(directory_fd, backup, uid, gid, &record) != 0 ||
+    if (read_record_at(artifact_directory_fd, backup, uid, gid, &record) != 0 ||
         !records_match(&record, expected)) {
         goto cleanup;
     }
-    if (read_record_at(directory_fd, target, uid, gid, &current) == 0) {
+    if (read_record_at(target_directory_fd, target, uid, gid, &current) == 0) {
         if (records_match(&current, expected)) {
             result = 0;
             goto cleanup;
@@ -1019,7 +1341,8 @@ static int restore_backup(int directory_fd, const char *backup,
             strcmp(current.key_id, replacement_key) != 0) {
             goto cleanup;
         }
-    } else if (fstatat(directory_fd, target, &status, AT_SYMLINK_NOFOLLOW) ==
+    } else if (fstatat(target_directory_fd, target, &status,
+                       AT_SYMLINK_NOFOLLOW) ==
                    0 ||
                errno != ENOENT) {
         goto cleanup;
@@ -1028,24 +1351,56 @@ static int restore_backup(int directory_fd, const char *backup,
         serialize_record(expected, serialized, &serialized_length) != 0) {
         goto cleanup;
     }
-    if (fstatat(directory_fd, restore_name, &status, AT_SYMLINK_NOFOLLOW) ==
+    if (fstatat(artifact_directory_fd, restore_name, &status,
+                AT_SYMLINK_NOFOLLOW) ==
         0) {
         restore_exists = 1;
-        if (read_record_at(directory_fd, restore_name, uid, gid, &current) !=
+        if (read_record_at(artifact_directory_fd, restore_name, uid, gid,
+                           &current) !=
                 0 ||
             !records_match(&current, expected)) {
+            int restore_fd = openat(
+                artifact_directory_fd, restore_name,
+                O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+
+            if (restore_fd < 0 ||
+                (!metadata_is_file(restore_fd, server_owner_uid(),
+                                   server_owner_gid()) &&
+                 !metadata_is_file(restore_fd, uid, gid)) ||
+                !path_matches_fd(artifact_directory_fd, restore_name,
+                                 restore_fd)) {
+                if (restore_fd >= 0) {
+                    (void)close(restore_fd);
+                }
+                goto cleanup;
+            }
+            if (close(restore_fd) != 0 ||
+                unlinkat(artifact_directory_fd, restore_name, 0) != 0 ||
+                enroll_fsync_directory(artifact_directory_fd) != 0) {
+                goto cleanup;
+            }
+            restore_exists = 0;
+        }
+    } else if (errno != ENOENT) {
+        goto cleanup;
+    }
+    if (restore_exists == 0) {
+        stage_status = stage_record(artifact_directory_fd, restore_name, uid,
+                                    gid, serialized, serialized_length);
+        if (stage_status != 0) {
+            result = stage_status;
             goto cleanup;
         }
-    } else if (errno != ENOENT ||
-               stage_record(directory_fd, restore_name, uid, gid, serialized,
-                            serialized_length) != 0) {
-        goto cleanup;
-    } else {
         restore_exists = 1;
     }
     if (restore_exists == 0 ||
-        enroll_rename(directory_fd, restore_name, directory_fd, target) != 0 ||
-        enroll_fsync_directory(directory_fd) != 0) {
+        enroll_rename(artifact_directory_fd, restore_name, target_directory_fd,
+                      target) != 0 ||
+        enroll_fsync_directory(artifact_directory_fd) != 0 ||
+        (artifact_directory_fd != target_directory_fd &&
+         enroll_fsync_directory(target_directory_fd) != 0) ||
+        read_record_at(target_directory_fd, target, uid, gid, &current) != 0 ||
+        !records_match(&current, expected)) {
         goto cleanup;
     }
     result = 0;
@@ -1075,9 +1430,14 @@ struct rotation_journal {
     char service[OCRA_SERVICE_MAX_LENGTH + 1U];
     char old_key[OCRA_KEY_ID_HEX_LENGTH + 1U];
     char new_key[OCRA_KEY_ID_HEX_LENGTH + 1U];
+    char old_digest[OCRA_DIGEST_HEX_LENGTH + 1U];
+    char new_digest[OCRA_DIGEST_HEX_LENGTH + 1U];
     dev_t client_device;
     ino_t client_inode;
+    dev_t client_txn_device;
+    ino_t client_txn_inode;
     char client_name[NAME_MAX + 1U];
+    char client_txn_name[NAME_MAX + 1U];
     char client_path[PATH_MAX];
 };
 
@@ -1088,43 +1448,62 @@ static int write_rotation_journal(int server_fd, const char *journal_name,
     unsigned char body[OCRA_JOURNAL_CAPACITY];
     char path_hex[PATH_MAX * 2U + 1U];
     char name_hex[NAME_MAX * 2U + 1U];
+    char txn_name_hex[NAME_MAX * 2U + 1U];
     char temp_name[NAME_MAX + 1U];
     int count;
+    int stage_status;
     int staged = 0;
     int result = -1;
 
     (void)memset(body, 0, sizeof(body));
     (void)memset(path_hex, 0, sizeof(path_hex));
     (void)memset(name_hex, 0, sizeof(name_hex));
+    (void)memset(txn_name_hex, 0, sizeof(txn_name_hex));
     if (journal == NULL ||
         ((strcmp(phase, "preparing") == 0 &&
-          !target_is_absent(server_fd, journal_name)) ||
+          !target_is_absent(server_fd, journal_name) &&
+          !journal_identity_matches(server_fd, "rotate",
+                                    journal->transaction_id)) ||
          (strcmp(phase, "preparing") != 0 &&
           !journal_identity_matches(server_fd, "rotate",
                                     journal->transaction_id))) ||
         hex_encode_text(journal->client_path, path_hex,
                                             sizeof(path_hex)) != 0 ||
         hex_encode_text(journal->client_name, name_hex, sizeof(name_hex)) !=
-            0) {
+            0 ||
+        hex_encode_text(journal->client_txn_name, txn_name_hex,
+                        sizeof(txn_name_hex)) != 0) {
         goto cleanup;
     }
     count = snprintf((char *)body, sizeof(body),
                      "version=2\noperation=rotate\nphase=%s\ntxid=%s\n"
                      "uid=%s\ngid=%" PRIuMAX "\nservice=%s\nold_key=%s\n"
-                     "new_key=%s\nclient_dev=%" PRIuMAX
-                     "\nclient_ino=%" PRIuMAX "\nclient_name=%s\n"
+                     "new_key=%s\nold_digest=%s\nnew_digest=%s\n"
+                     "client_dev=%" PRIuMAX
+                     "\nclient_ino=%" PRIuMAX
+                     "\nclient_txn_dev=%" PRIuMAX
+                     "\nclient_txn_ino=%" PRIuMAX
+                     "\nclient_name=%s\nclient_txn_name=%s\n"
                      "client_path=%s\n",
                      phase, journal->transaction_id, journal->uid_text,
                      (uintmax_t)journal->gid, journal->service,
-                     journal->old_key, journal->new_key,
+                     journal->old_key, journal->new_key, journal->old_digest,
+                     journal->new_digest,
                      (uintmax_t)journal->client_device,
-                     (uintmax_t)journal->client_inode, name_hex, path_hex);
+                     (uintmax_t)journal->client_inode,
+                     (uintmax_t)journal->client_txn_device,
+                     (uintmax_t)journal->client_txn_inode, name_hex,
+                     txn_name_hex, path_hex);
     if (count < 0 || (size_t)count >= sizeof(body) ||
         format_name(temp_name, journal_name, "journal",
                     journal->transaction_id) != 0 ||
-        !target_is_absent(server_fd, temp_name) ||
-        stage_record(server_fd, temp_name, server_owner_uid(),
-                     server_owner_gid(), body, (size_t)count) != 0) {
+        !target_is_absent(server_fd, temp_name)) {
+        goto cleanup;
+    }
+    stage_status = stage_record(server_fd, temp_name, server_owner_uid(),
+                                server_owner_gid(), body, (size_t)count);
+    if (stage_status != 0) {
+        result = stage_status;
         goto cleanup;
     }
     staged = 1;
@@ -1144,6 +1523,7 @@ cleanup:
     secure_memory_clear(body, sizeof(body));
     secure_memory_clear(path_hex, sizeof(path_hex));
     secure_memory_clear(name_hex, sizeof(name_hex));
+    secure_memory_clear(txn_name_hex, sizeof(txn_name_hex));
     return result;
 }
 
@@ -1228,6 +1608,16 @@ static int read_rotation_journal(int server_fd, const char *journal_name,
         goto cleanup;
     }
     (void)strcpy(journal->new_key, value);
+    value = journal_field(&cursor, "old_digest=");
+    if (!lowercase_hex_is_valid(value, OCRA_DIGEST_HEX_LENGTH)) {
+        goto cleanup;
+    }
+    (void)strcpy(journal->old_digest, value);
+    value = journal_field(&cursor, "new_digest=");
+    if (!lowercase_hex_is_valid(value, OCRA_DIGEST_HEX_LENGTH)) {
+        goto cleanup;
+    }
+    (void)strcpy(journal->new_digest, value);
     value = journal_field(&cursor, "client_dev=");
     if (parse_uintmax_strict(value, &parsed_device) != 0 ||
         (uintmax_t)(dev_t)parsed_device != parsed_device) {
@@ -1240,11 +1630,30 @@ static int read_rotation_journal(int server_fd, const char *journal_name,
         goto cleanup;
     }
     journal->client_inode = (ino_t)parsed_inode;
+    value = journal_field(&cursor, "client_txn_dev=");
+    if (parse_uintmax_strict(value, &parsed_device) != 0 ||
+        (uintmax_t)(dev_t)parsed_device != parsed_device) {
+        goto cleanup;
+    }
+    journal->client_txn_device = (dev_t)parsed_device;
+    value = journal_field(&cursor, "client_txn_ino=");
+    if (parse_uintmax_strict(value, &parsed_inode) != 0 ||
+        (uintmax_t)(ino_t)parsed_inode != parsed_inode) {
+        goto cleanup;
+    }
+    journal->client_txn_inode = (ino_t)parsed_inode;
     value = journal_field(&cursor, "client_name=");
     if (hex_decode_text(value, journal->client_name,
                         sizeof(journal->client_name)) != 0 ||
         !component_is_safe(journal->client_name,
                            strlen(journal->client_name))) {
+        goto cleanup;
+    }
+    value = journal_field(&cursor, "client_txn_name=");
+    if (hex_decode_text(value, journal->client_txn_name,
+                        sizeof(journal->client_txn_name)) != 0 ||
+        !component_is_safe(journal->client_txn_name,
+                           strlen(journal->client_txn_name))) {
         goto cleanup;
     }
     value = journal_field(&cursor, "client_path=");
@@ -1253,7 +1662,8 @@ static int read_rotation_journal(int server_fd, const char *journal_name,
         journal->client_path[0] != '/' || *cursor != '\0' ||
         (strcmp(journal->phase, "preparing") != 0 &&
          strcmp(journal->phase, "prepared") != 0 &&
-         strcmp(journal->phase, "committing") != 0)) {
+         strcmp(journal->phase, "committing") != 0 &&
+         strcmp(journal->phase, "cleanup") != 0)) {
         goto cleanup;
     }
     result = 0;
@@ -1283,6 +1693,7 @@ static int recover_rotation(int server_root_fd, int rate_root_fd)
     struct ocra_secret_record server_record;
     struct ocra_secret_record client_record;
     struct enroll_target client;
+    struct enroll_txn_directory client_transaction;
     char server_name[OCRA_SERVICE_MAX_LENGTH + sizeof(".conf")];
     char server_new[NAME_MAX + 1U];
     char server_backup[NAME_MAX + 1U];
@@ -1294,11 +1705,14 @@ static int recover_rotation(int server_root_fd, int rate_root_fd)
     int client_backup_exists;
     int server_new_exists;
     int client_new_exists;
+    int transaction_status;
+    int transaction_directory_absent = 0;
     int result = -1;
 
     (void)memset(&journal, 0, sizeof(journal));
     (void)memset(&client, 0, sizeof(client));
     client.directory_fd = -1;
+    client_transaction.fd = -1;
     ocra_secret_record_clear(&server_record);
     ocra_secret_record_clear(&client_record);
     if (!path_exists_regular(server_root_fd, OCRA_ADMIN_JOURNAL_NAME)) {
@@ -1332,20 +1746,54 @@ static int recover_rotation(int server_root_fd, int rate_root_fd)
                     journal.transaction_id) != 0) {
         goto cleanup;
     }
+    transaction_status = open_transaction_directory(
+        client.directory_fd, journal.client_txn_name,
+        journal.client_txn_device, journal.client_txn_inode,
+        &client_transaction);
+    if (transaction_status == 1 &&
+        strcmp(journal.phase, "preparing") == 0 &&
+        journal.client_txn_device == (dev_t)0 &&
+        journal.client_txn_inode == (ino_t)0) {
+        if (remove_admin_journal(server_root_fd, "rotate",
+                                 journal.transaction_id) == 0) {
+            result = 0;
+        }
+        goto cleanup;
+    }
+    if (transaction_status == 1 &&
+        (strcmp(journal.phase, "committing") == 0 ||
+         strcmp(journal.phase, "cleanup") == 0)) {
+        transaction_directory_absent = 1;
+        client_new_exists = 0;
+        client_backup_exists = 0;
+    }
+    if (transaction_status != 0 && transaction_directory_absent == 0) {
+        goto cleanup;
+    }
     if (!journal_identity_matches(server_root_fd, "rotate",
                                   journal.transaction_id) ||
         record_artifact_state(server_fd, server_backup, server_owner_uid(),
                               server_owner_gid(), journal.old_key,
+                              journal.old_digest,
+                              strcmp(journal.phase, "preparing") == 0,
                               &server_backup_exists) != 0 ||
-        record_artifact_state(client.directory_fd, client_backup, uid,
+        (transaction_directory_absent == 0 &&
+         record_artifact_state(client_transaction.fd, client_backup, uid,
                               journal.gid, journal.old_key,
-                              &client_backup_exists) != 0 ||
+                              journal.old_digest,
+                              strcmp(journal.phase, "preparing") == 0,
+                              &client_backup_exists) != 0) ||
         record_artifact_state(server_fd, server_new, server_owner_uid(),
                               server_owner_gid(), journal.new_key,
+                              journal.new_digest,
+                              strcmp(journal.phase, "preparing") == 0,
                               &server_new_exists) != 0 ||
-        record_artifact_state(client.directory_fd, client_new, uid,
+        (transaction_directory_absent == 0 &&
+         record_artifact_state(client_transaction.fd, client_new, uid,
                               journal.gid, journal.new_key,
-                              &client_new_exists) != 0) {
+                              journal.new_digest,
+                              strcmp(journal.phase, "preparing") == 0,
+                              &client_new_exists) != 0)) {
         goto cleanup;
     }
     if (strcmp(journal.phase, "preparing") == 0) {
@@ -1356,20 +1804,27 @@ static int recover_rotation(int server_root_fd, int rate_root_fd)
                            server_owner_gid(), &server_record) == 0 &&
             read_record_at(client.directory_fd, client.name, uid, journal.gid,
                            &client_record) == 0 &&
-            strcmp(server_record.key_id, journal.old_key) == 0 &&
+            record_matches_digest(&server_record, journal.old_key,
+                                  journal.old_digest) &&
+            record_matches_digest(&client_record, journal.old_key,
+                                  journal.old_digest) &&
             records_match(&server_record, &client_record);
 
         if (!targets_are_old) {
             if (!server_backup_exists || !client_backup_exists ||
                 read_record_at(server_fd, server_backup, server_owner_uid(),
                                server_owner_gid(), &server_record) != 0 ||
-                read_record_at(client.directory_fd, client_backup, uid,
+                read_record_at(client_transaction.fd, client_backup, uid,
                                journal.gid, &client_record) != 0 ||
-                strcmp(server_record.key_id, journal.old_key) != 0 ||
+                !record_matches_digest(&server_record, journal.old_key,
+                                       journal.old_digest) ||
+                !record_matches_digest(&client_record, journal.old_key,
+                                       journal.old_digest) ||
                 !records_match(&server_record, &client_record) ||
                 !journal_identity_matches(server_root_fd, "rotate",
                                           journal.transaction_id) ||
-                restore_backup(server_fd, server_backup, server_name,
+                restore_backup(server_fd, server_backup, server_fd,
+                               server_name,
                                server_owner_uid(), server_owner_gid(),
                                &server_record, journal.new_key,
                                journal.transaction_id,
@@ -1377,25 +1832,43 @@ static int recover_rotation(int server_root_fd, int rate_root_fd)
                 inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_RECOVERY) != 0 ||
                 !journal_identity_matches(server_root_fd, "rotate",
                                           journal.transaction_id) ||
-                restore_backup(client.directory_fd, client_backup, client.name,
-                               uid, journal.gid, &client_record,
+                restore_backup(client_transaction.fd, client_backup,
+                               client.directory_fd, client.name, uid,
+                               journal.gid, &client_record,
                                journal.new_key, journal.transaction_id,
                                &client_backup_exists) != 0) {
                 goto cleanup;
             }
         }
-    } else {
+    } else if (strcmp(journal.phase, "committing") == 0) {
         if (read_record_at(server_fd, server_name, server_owner_uid(),
                            server_owner_gid(), &server_record) != 0 ||
             read_record_at(client.directory_fd, client.name, uid, journal.gid,
                            &client_record) != 0 ||
-            strcmp(server_record.key_id, journal.new_key) != 0 ||
-            strcmp(client_record.key_id, journal.new_key) != 0 ||
+            !record_matches_digest(&server_record, journal.new_key,
+                                   journal.new_digest) ||
+            !record_matches_digest(&client_record, journal.new_key,
+                                   journal.new_digest) ||
             !records_match(&server_record, &client_record) ||
             enroll_remove_rate(rate_root_fd, journal.uid_text, journal.service,
                                journal.old_key) != 0) {
             goto cleanup;
         }
+    } else if (!target_matches_digest_at(
+                   server_fd, server_name, server_owner_uid(),
+                   server_owner_gid(), journal.old_key, journal.old_digest) ||
+               !target_matches_digest_at(
+                   client.directory_fd, client.name, uid, journal.gid,
+                   journal.old_key, journal.old_digest)) {
+        goto cleanup;
+    }
+    if (strcmp(journal.phase, "committing") != 0 &&
+        strcmp(journal.phase, "cleanup") != 0) {
+        if (write_rotation_journal(server_root_fd, OCRA_ADMIN_JOURNAL_NAME,
+                                   &journal, "cleanup") != 0) {
+            goto cleanup;
+        }
+        (void)strcpy(journal.phase, "cleanup");
     }
     if (server_new_exists != 0) {
         if (remove_transaction_artifact(server_root_fd, "rotate",
@@ -1408,7 +1881,7 @@ static int recover_rotation(int server_root_fd, int rate_root_fd)
     if (client_new_exists != 0) {
         if (remove_transaction_artifact(server_root_fd, "rotate",
                                         journal.transaction_id,
-                                        client.directory_fd, client_new,
+                                        client_transaction.fd, client_new,
                                         &client_new_exists) != 0 ||
             inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_RECOVERY) != 0) {
             goto cleanup;
@@ -1426,13 +1899,16 @@ static int recover_rotation(int server_root_fd, int rate_root_fd)
     if (client_backup_exists != 0) {
         if (remove_transaction_artifact(server_root_fd, "rotate",
                                         journal.transaction_id,
-                                        client.directory_fd, client_backup,
+                                        client_transaction.fd, client_backup,
                                         &client_backup_exists) != 0 ||
             inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_RECOVERY) != 0) {
             goto cleanup;
         }
     }
-    if (remove_admin_journal(server_root_fd, "rotate",
+    if ((transaction_directory_absent == 0 &&
+         remove_transaction_directory(client.directory_fd,
+                                      &client_transaction) != 0) ||
+        remove_admin_journal(server_root_fd, "rotate",
                              journal.transaction_id) != 0 ||
         enroll_fsync_directory(server_fd) != 0 ||
         enroll_fsync_directory(client.directory_fd) != 0 ||
@@ -1447,6 +1923,9 @@ cleanup:
     }
     if (client.directory_fd >= 0) {
         (void)close(client.directory_fd);
+    }
+    if (client_transaction.fd >= 0) {
+        (void)close(client_transaction.fd);
     }
     ocra_secret_record_clear(&client_record);
     ocra_secret_record_clear(&server_record);
@@ -1463,6 +1942,7 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
     struct ocra_secret_record fresh;
     struct rotation_journal journal;
     struct enroll_target client;
+    struct enroll_txn_directory client_transaction;
     unsigned char old_record[OCRA_RECORD_CAPACITY];
     unsigned char new_record[OCRA_RECORD_CAPACITY];
     char server_name[OCRA_SERVICE_MAX_LENGTH + sizeof(".conf")];
@@ -1489,6 +1969,7 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
     int leave_transaction = 0;
     int transaction_committed = 0;
     int rollback_failed = 0;
+    int persistence_status;
     int result = -1;
 
     ocra_secret_record_clear(&old_server);
@@ -1503,6 +1984,7 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
     (void)memset(fresh_key_id, 0, sizeof(fresh_key_id));
     (void)memset(transaction_id, 0, sizeof(transaction_id));
     client.directory_fd = -1;
+    client_transaction.fd = -1;
     if (snprintf(server_name, sizeof(server_name), "%s.conf", service) < 0 ||
         open_client_target(client_path, uid, gid, &client) != 0) {
         goto cleanup;
@@ -1529,11 +2011,16 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
         ocra_secret_record_clear(&fresh);
         secure_memory_clear(new_record, sizeof(new_record));
     }
-    if (attempt == 8U || build_transaction_id(transaction_id) != 0 ||
+    if (attempt == 8U ||
+        digest_bytes(old_record, old_length, journal.old_digest) != 0 ||
+        digest_bytes(new_record, new_length, journal.new_digest) != 0 ||
+        build_transaction_id(transaction_id) != 0 ||
         format_name(server_new, server_name, "new", transaction_id) != 0 ||
         format_name(server_backup, server_name, "old", transaction_id) != 0 ||
         format_name(client_new, client.name, "new", transaction_id) != 0 ||
         format_name(client_backup, client.name, "old", transaction_id) != 0 ||
+        format_transaction_directory_name(journal.client_txn_name,
+                                          transaction_id) != 0 ||
         snprintf(journal.uid_text, sizeof(journal.uid_text), "%s", uid_text) <
             0 ||
         snprintf(journal.service, sizeof(journal.service), "%s", service) < 0 ||
@@ -1549,17 +2036,34 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
     journal.gid = gid;
     journal.client_device = client.device;
     journal.client_inode = client.inode;
-    if (write_rotation_journal(server_root_fd, OCRA_ADMIN_JOURNAL_NAME,
-                               &journal, "preparing") != 0) {
+    persistence_status = write_rotation_journal(
+        server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal, "preparing");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     journal_exists = 1;
+    if (create_transaction_directory(client.directory_fd, transaction_id,
+                                     &client_transaction) != 0) {
+        goto cleanup;
+    }
+    journal.client_txn_device = client_transaction.device;
+    journal.client_txn_inode = client_transaction.inode;
+    persistence_status = write_rotation_journal(
+        server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal, "preparing");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
+        goto cleanup;
+    }
     if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_PREPARE) != 0) {
         leave_transaction = 1;
         goto cleanup;
     }
-    if (stage_record(server_fd, server_new, server_owner_uid(),
-                     server_owner_gid(), new_record, new_length) != 0) {
+    persistence_status = stage_record(server_fd, server_new,
+                                      server_owner_uid(), server_owner_gid(),
+                                      new_record, new_length);
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     server_new_exists = 1;
@@ -1567,8 +2071,10 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
         leave_transaction = 1;
         goto cleanup;
     }
-    if (stage_record(client.directory_fd, client_new, uid, gid, new_record,
-                     new_length) != 0) {
+    persistence_status = stage_record(client_transaction.fd, client_new, uid,
+                                      gid, new_record, new_length);
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     client_new_exists = 1;
@@ -1576,8 +2082,11 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
         leave_transaction = 1;
         goto cleanup;
     }
-    if (stage_record(server_fd, server_backup, server_owner_uid(),
-                     server_owner_gid(), old_record, old_length) != 0) {
+    persistence_status = stage_record(server_fd, server_backup,
+                                      server_owner_uid(), server_owner_gid(),
+                                      old_record, old_length);
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     server_backup_exists = 1;
@@ -1585,8 +2094,10 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
         leave_transaction = 1;
         goto cleanup;
     }
-    if (stage_record(client.directory_fd, client_backup, uid, gid, old_record,
-                     old_length) != 0) {
+    persistence_status = stage_record(client_transaction.fd, client_backup,
+                                      uid, gid, old_record, old_length);
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     client_backup_exists = 1;
@@ -1594,17 +2105,25 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
         leave_transaction = 1;
         goto cleanup;
     }
-    if (write_rotation_journal(server_root_fd, OCRA_ADMIN_JOURNAL_NAME,
-                               &journal, "prepared") != 0) {
+    persistence_status = write_rotation_journal(
+        server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal, "prepared");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_PREPARE) != 0) {
         leave_transaction = 1;
         goto cleanup;
     }
-    if (enroll_rename(client.directory_fd, client_new, client.directory_fd,
+    if (!target_matches_digest_at(client.directory_fd, client.name, uid, gid,
+                                  journal.old_key, journal.old_digest) ||
+        !target_matches_digest_at(client_transaction.fd, client_new, uid, gid,
+                                  journal.new_key, journal.new_digest) ||
+        enroll_rename(client_transaction.fd, client_new, client.directory_fd,
                       client.name) != 0 ||
-        enroll_fsync_directory(client.directory_fd) != 0) {
+        enroll_fsync_directory(client.directory_fd) != 0 ||
+        !target_matches_digest_at(client.directory_fd, client.name, uid, gid,
+                                  journal.new_key, journal.new_digest)) {
         goto cleanup;
     }
     client_new_exists = 0;
@@ -1622,14 +2141,25 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
         CRYPTO_memcmp(supplied, expected, OCRA_RESPONSE_DIGITS) != 0) {
         goto cleanup;
     }
-    if (enroll_rename(server_fd, server_new, server_fd, server_name) != 0 ||
-        enroll_fsync_directory(server_fd) != 0) {
+    if (!target_matches_digest_at(server_fd, server_name, server_owner_uid(),
+                                  server_owner_gid(), journal.old_key,
+                                  journal.old_digest) ||
+        !target_matches_digest_at(server_fd, server_new, server_owner_uid(),
+                                  server_owner_gid(), journal.new_key,
+                                  journal.new_digest) ||
+        enroll_rename(server_fd, server_new, server_fd, server_name) != 0 ||
+        enroll_fsync_directory(server_fd) != 0 ||
+        !target_matches_digest_at(server_fd, server_name, server_owner_uid(),
+                                  server_owner_gid(), journal.new_key,
+                                  journal.new_digest)) {
         goto cleanup;
     }
     server_new_exists = 0;
     server_installed = 1;
-    if (write_rotation_journal(server_root_fd, OCRA_ADMIN_JOURNAL_NAME,
-                               &journal, "committing") != 0) {
+    persistence_status = write_rotation_journal(
+        server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal, "committing");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_AFTER_COMMITTING) != 0) {
@@ -1646,9 +2176,11 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
                                     &server_backup_exists) != 0 ||
         enroll_fsync_directory(server_fd) != 0 ||
         remove_transaction_artifact(server_root_fd, "rotate", transaction_id,
-                                    client.directory_fd, client_backup,
+                                    client_transaction.fd, client_backup,
                                     &client_backup_exists) != 0 ||
-        enroll_fsync_directory(client.directory_fd) != 0 ||
+        enroll_fsync_directory(client_transaction.fd) != 0 ||
+        remove_transaction_directory(client.directory_fd,
+                                     &client_transaction) != 0 ||
         remove_admin_journal(server_root_fd, "rotate", transaction_id) != 0 ||
         enroll_fsync_directory(server_fd) != 0 ||
         enroll_fsync_directory(server_root_fd) != 0 ||
@@ -1671,7 +2203,8 @@ cleanup:
     }
     if (result != 0 && transaction_committed == 0) {
         if (server_installed != 0) {
-            if (restore_backup(server_fd, server_backup, server_name,
+            if (restore_backup(server_fd, server_backup, server_fd,
+                               server_name,
                                server_owner_uid(), server_owner_gid(),
                                &old_server, fresh.key_id, transaction_id,
                                &server_backup_exists) != 0) {
@@ -1679,8 +2212,9 @@ cleanup:
             }
         }
         if (client_installed != 0) {
-            if (restore_backup(client.directory_fd, client_backup,
-                               client.name, uid, gid, &old_client,
+            if (restore_backup(client_transaction.fd, client_backup,
+                               client.directory_fd, client.name, uid, gid,
+                               &old_client,
                                fresh.key_id, transaction_id,
                                &client_backup_exists) != 0) {
                 rollback_failed = 1;
@@ -1691,12 +2225,17 @@ cleanup:
         goto close_and_clear;
     }
     (void)remove_staged(server_fd, server_new, &server_new_exists);
-    (void)remove_staged(client.directory_fd, client_new, &client_new_exists);
+    (void)remove_staged(client_transaction.fd, client_new,
+                        &client_new_exists);
     (void)remove_staged(server_fd, server_backup, &server_backup_exists);
-    (void)remove_staged(client.directory_fd, client_backup,
+    (void)remove_staged(client_transaction.fd, client_backup,
                         &client_backup_exists);
     if (journal_exists != 0 && transaction_committed == 0) {
         (void)remove_admin_journal(server_root_fd, "rotate", transaction_id);
+    }
+    if (client_transaction.fd >= 0) {
+        (void)remove_transaction_directory(client.directory_fd,
+                                           &client_transaction);
     }
 close_and_clear:
     if (server_fd >= 0) {
@@ -1709,6 +2248,9 @@ close_and_clear:
     if (client.directory_fd >= 0) {
         (void)fsync(client.directory_fd);
         (void)close(client.directory_fd);
+    }
+    if (client_transaction.fd >= 0) {
+        (void)close(client_transaction.fd);
     }
     secure_memory_clear(fresh_key_id, sizeof(fresh_key_id));
     secure_memory_clear(expected, sizeof(expected));
@@ -1738,9 +2280,13 @@ struct add_journal {
     gid_t gid;
     char service[OCRA_SERVICE_MAX_LENGTH + 1U];
     char new_key[OCRA_KEY_ID_HEX_LENGTH + 1U];
+    char new_digest[OCRA_DIGEST_HEX_LENGTH + 1U];
     dev_t client_device;
     ino_t client_inode;
+    dev_t client_txn_device;
+    ino_t client_txn_inode;
     char client_name[NAME_MAX + 1U];
+    char client_txn_name[NAME_MAX + 1U];
     char client_path[PATH_MAX];
 };
 
@@ -1751,41 +2297,60 @@ static int write_add_journal(int server_fd, const char *journal_name,
     unsigned char body[OCRA_JOURNAL_CAPACITY];
     char path_hex[PATH_MAX * 2U + 1U];
     char name_hex[NAME_MAX * 2U + 1U];
+    char txn_name_hex[NAME_MAX * 2U + 1U];
     char temp_name[NAME_MAX + 1U];
     int count;
+    int stage_status;
     int staged = 0;
     int result = -1;
 
     (void)memset(body, 0, sizeof(body));
     (void)memset(path_hex, 0, sizeof(path_hex));
     (void)memset(name_hex, 0, sizeof(name_hex));
+    (void)memset(txn_name_hex, 0, sizeof(txn_name_hex));
     if (journal == NULL ||
         ((strcmp(phase, "preparing") == 0 &&
-          !target_is_absent(server_fd, journal_name)) ||
+          !target_is_absent(server_fd, journal_name) &&
+          !journal_identity_matches(server_fd, "add",
+                                    journal->transaction_id)) ||
          (strcmp(phase, "preparing") != 0 &&
           !journal_identity_matches(server_fd, "add",
                                     journal->transaction_id))) ||
         hex_encode_text(journal->client_path, path_hex,
                                             sizeof(path_hex)) != 0 ||
         hex_encode_text(journal->client_name, name_hex, sizeof(name_hex)) !=
-            0) {
+            0 ||
+        hex_encode_text(journal->client_txn_name, txn_name_hex,
+                        sizeof(txn_name_hex)) != 0) {
         goto cleanup;
     }
     count = snprintf((char *)body, sizeof(body),
                      "version=2\noperation=add\nphase=%s\ntxid=%s\n"
                      "uid=%s\ngid=%" PRIuMAX "\nservice=%s\nnew_key=%s\n"
+                     "new_digest=%s\n"
                      "client_dev=%" PRIuMAX "\nclient_ino=%" PRIuMAX
-                     "\nclient_name=%s\nclient_path=%s\n",
+                     "\nclient_txn_dev=%" PRIuMAX
+                     "\nclient_txn_ino=%" PRIuMAX
+                     "\nclient_name=%s\nclient_txn_name=%s\n"
+                     "client_path=%s\n",
                      phase, journal->transaction_id, journal->uid_text,
                      (uintmax_t)journal->gid, journal->service,
-                     journal->new_key, (uintmax_t)journal->client_device,
-                     (uintmax_t)journal->client_inode, name_hex, path_hex);
+                     journal->new_key, journal->new_digest,
+                     (uintmax_t)journal->client_device,
+                     (uintmax_t)journal->client_inode,
+                     (uintmax_t)journal->client_txn_device,
+                     (uintmax_t)journal->client_txn_inode, name_hex,
+                     txn_name_hex, path_hex);
     if (count < 0 || (size_t)count >= sizeof(body) ||
         format_name(temp_name, journal_name, "journal",
                     journal->transaction_id) != 0 ||
-        !target_is_absent(server_fd, temp_name) ||
-        stage_record(server_fd, temp_name, server_owner_uid(),
-                     server_owner_gid(), body, (size_t)count) != 0) {
+        !target_is_absent(server_fd, temp_name)) {
+        goto cleanup;
+    }
+    stage_status = stage_record(server_fd, temp_name, server_owner_uid(),
+                                server_owner_gid(), body, (size_t)count);
+    if (stage_status != 0) {
+        result = stage_status;
         goto cleanup;
     }
     staged = 1;
@@ -1805,6 +2370,7 @@ cleanup:
     secure_memory_clear(body, sizeof(body));
     secure_memory_clear(path_hex, sizeof(path_hex));
     secure_memory_clear(name_hex, sizeof(name_hex));
+    secure_memory_clear(txn_name_hex, sizeof(txn_name_hex));
     return result;
 }
 
@@ -1884,6 +2450,11 @@ static int read_add_journal(int server_fd, const char *journal_name,
         goto cleanup;
     }
     (void)strcpy(journal->new_key, value);
+    value = journal_field(&cursor, "new_digest=");
+    if (!lowercase_hex_is_valid(value, OCRA_DIGEST_HEX_LENGTH)) {
+        goto cleanup;
+    }
+    (void)strcpy(journal->new_digest, value);
     value = journal_field(&cursor, "client_dev=");
     if (parse_uintmax_strict(value, &parsed_device) != 0 ||
         (uintmax_t)(dev_t)parsed_device != parsed_device) {
@@ -1896,11 +2467,30 @@ static int read_add_journal(int server_fd, const char *journal_name,
         goto cleanup;
     }
     journal->client_inode = (ino_t)parsed_inode;
+    value = journal_field(&cursor, "client_txn_dev=");
+    if (parse_uintmax_strict(value, &parsed_device) != 0 ||
+        (uintmax_t)(dev_t)parsed_device != parsed_device) {
+        goto cleanup;
+    }
+    journal->client_txn_device = (dev_t)parsed_device;
+    value = journal_field(&cursor, "client_txn_ino=");
+    if (parse_uintmax_strict(value, &parsed_inode) != 0 ||
+        (uintmax_t)(ino_t)parsed_inode != parsed_inode) {
+        goto cleanup;
+    }
+    journal->client_txn_inode = (ino_t)parsed_inode;
     value = journal_field(&cursor, "client_name=");
     if (hex_decode_text(value, journal->client_name,
                         sizeof(journal->client_name)) != 0 ||
         !component_is_safe(journal->client_name,
                            strlen(journal->client_name))) {
+        goto cleanup;
+    }
+    value = journal_field(&cursor, "client_txn_name=");
+    if (hex_decode_text(value, journal->client_txn_name,
+                        sizeof(journal->client_txn_name)) != 0 ||
+        !component_is_safe(journal->client_txn_name,
+                           strlen(journal->client_txn_name))) {
         goto cleanup;
     }
     value = journal_field(&cursor, "client_path=");
@@ -1926,7 +2516,8 @@ cleanup:
 }
 
 static int remove_target_for_key(int directory_fd, const char *name, uid_t uid,
-                                 gid_t gid, const char *key_id)
+                                 gid_t gid, const char *key_id,
+                                 const char *digest)
 {
     struct ocra_secret_record record;
     struct stat status;
@@ -1938,7 +2529,7 @@ static int remove_target_for_key(int directory_fd, const char *name, uid_t uid,
         goto cleanup;
     }
     if (read_record_at(directory_fd, name, uid, gid, &record) != 0 ||
-        strcmp(record.key_id, key_id) != 0 ||
+        !record_matches_digest(&record, key_id, digest) ||
         unlinkat(directory_fd, name, 0) != 0 ||
         enroll_fsync_directory(directory_fd) != 0) {
         goto cleanup;
@@ -1956,6 +2547,7 @@ static int recover_add(int server_root_fd)
     struct ocra_secret_record server_record;
     struct ocra_secret_record client_record;
     struct enroll_target client;
+    struct enroll_txn_directory client_transaction;
     struct stat status;
     char server_name[OCRA_SERVICE_MAX_LENGTH + sizeof(".conf")];
     char server_new[NAME_MAX + 1U];
@@ -1964,11 +2556,14 @@ static int recover_add(int server_root_fd)
     int server_fd = -1;
     int server_new_exists;
     int client_new_exists;
+    int transaction_status;
+    int transaction_directory_absent = 0;
     int result = -1;
 
     (void)memset(&journal, 0, sizeof(journal));
     (void)memset(&client, 0, sizeof(client));
     client.directory_fd = -1;
+    client_transaction.fd = -1;
     ocra_secret_record_clear(&server_record);
     ocra_secret_record_clear(&client_record);
     if (fstatat(server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &status,
@@ -1996,14 +2591,40 @@ static int recover_add(int server_root_fd)
                     journal.transaction_id) != 0) {
         goto cleanup;
     }
+    transaction_status = open_transaction_directory(
+        client.directory_fd, journal.client_txn_name,
+        journal.client_txn_device, journal.client_txn_inode,
+        &client_transaction);
+    if (transaction_status == 1 &&
+        strcmp(journal.phase, "preparing") == 0 &&
+        journal.client_txn_device == (dev_t)0 &&
+        journal.client_txn_inode == (ino_t)0) {
+        if (remove_admin_journal(server_root_fd, "add",
+                                 journal.transaction_id) == 0) {
+            result = 0;
+        }
+        goto cleanup;
+    }
+    if (transaction_status == 1 && strcmp(journal.phase, "committing") == 0) {
+        transaction_directory_absent = 1;
+        client_new_exists = 0;
+    }
+    if (transaction_status != 0 && transaction_directory_absent == 0) {
+        goto cleanup;
+    }
     if (!journal_identity_matches(server_root_fd, "add",
                                   journal.transaction_id) ||
         record_artifact_state(server_fd, server_new, server_owner_uid(),
                               server_owner_gid(), journal.new_key,
+                              journal.new_digest,
+                              strcmp(journal.phase, "preparing") == 0,
                               &server_new_exists) != 0 ||
-        record_artifact_state(client.directory_fd, client_new, uid,
+        (transaction_directory_absent == 0 &&
+         record_artifact_state(client_transaction.fd, client_new, uid,
                               journal.gid, journal.new_key,
-                              &client_new_exists) != 0) {
+                              journal.new_digest,
+                              strcmp(journal.phase, "preparing") == 0,
+                              &client_new_exists) != 0)) {
         goto cleanup;
     }
     if (strcmp(journal.phase, "preparing") == 0) {
@@ -2012,12 +2633,13 @@ static int recover_add(int server_root_fd)
         if (!journal_identity_matches(server_root_fd, "add",
                                       journal.transaction_id) ||
             remove_target_for_key(server_fd, server_name, server_owner_uid(),
-                                  server_owner_gid(), journal.new_key) != 0 ||
+                                  server_owner_gid(), journal.new_key,
+                                  journal.new_digest) != 0 ||
             !journal_identity_matches(server_root_fd, "add",
                                       journal.transaction_id) ||
             remove_target_for_key(client.directory_fd, client.name, uid,
-                                  journal.gid,
-                                  journal.new_key) != 0) {
+                                  journal.gid, journal.new_key,
+                                  journal.new_digest) != 0) {
             goto cleanup;
         }
     } else if (read_record_at(server_fd, server_name, server_owner_uid(),
@@ -2025,7 +2647,10 @@ static int recover_add(int server_root_fd)
                read_record_at(client.directory_fd, client.name, uid,
                               journal.gid,
                               &client_record) != 0 ||
-               strcmp(server_record.key_id, journal.new_key) != 0 ||
+               !record_matches_digest(&server_record, journal.new_key,
+                                      journal.new_digest) ||
+               !record_matches_digest(&client_record, journal.new_key,
+                                      journal.new_digest) ||
                !records_match(&server_record, &client_record)) {
         goto cleanup;
     }
@@ -2039,12 +2664,15 @@ static int recover_add(int server_root_fd)
     if (client_new_exists != 0 &&
         (remove_transaction_artifact(server_root_fd, "add",
                                      journal.transaction_id,
-                                     client.directory_fd, client_new,
+                                     client_transaction.fd, client_new,
                                      &client_new_exists) != 0 ||
          inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_RECOVERY) != 0)) {
         goto cleanup;
     }
-    if (remove_admin_journal(server_root_fd, "add",
+    if ((transaction_directory_absent == 0 &&
+         remove_transaction_directory(client.directory_fd,
+                                      &client_transaction) != 0) ||
+        remove_admin_journal(server_root_fd, "add",
                              journal.transaction_id) != 0 ||
         enroll_fsync_directory(server_fd) != 0 ||
         enroll_fsync_directory(client.directory_fd) != 0 ||
@@ -2060,6 +2688,9 @@ cleanup:
     if (client.directory_fd >= 0) {
         (void)close(client.directory_fd);
     }
+    if (client_transaction.fd >= 0) {
+        (void)close(client_transaction.fd);
+    }
     ocra_secret_record_clear(&client_record);
     ocra_secret_record_clear(&server_record);
     secure_memory_clear(&journal, sizeof(journal));
@@ -2073,6 +2704,7 @@ struct revoke_journal {
     gid_t gid;
     char service[OCRA_SERVICE_MAX_LENGTH + 1U];
     char old_key[OCRA_KEY_ID_HEX_LENGTH + 1U];
+    char old_digest[OCRA_DIGEST_HEX_LENGTH + 1U];
 };
 
 static int write_revoke_journal(int server_root_fd,
@@ -2082,6 +2714,7 @@ static int write_revoke_journal(int server_root_fd,
     unsigned char body[512U];
     char temp_name[NAME_MAX + 1U];
     int count;
+    int stage_status;
     int staged = 0;
     int result = -1;
 
@@ -2096,16 +2729,21 @@ static int write_revoke_journal(int server_root_fd,
     }
     count = snprintf((char *)body, sizeof(body),
                      "version=2\noperation=revoke\nphase=%s\ntxid=%s\n"
-                     "uid=%s\ngid=%" PRIuMAX "\nservice=%s\nold_key=%s\n",
+                     "uid=%s\ngid=%" PRIuMAX "\nservice=%s\nold_key=%s\n"
+                     "old_digest=%s\n",
                      phase, journal->transaction_id, journal->uid_text,
                      (uintmax_t)journal->gid, journal->service,
-                     journal->old_key);
+                     journal->old_key, journal->old_digest);
     if (count < 0 || (size_t)count >= sizeof(body) ||
         format_name(temp_name, OCRA_ADMIN_JOURNAL_NAME, "journal",
                     journal->transaction_id) != 0 ||
-        !target_is_absent(server_root_fd, temp_name) ||
-        stage_record(server_root_fd, temp_name, server_owner_uid(),
-                     server_owner_gid(), body, (size_t)count) != 0) {
+        !target_is_absent(server_root_fd, temp_name)) {
+        goto cleanup;
+    }
+    stage_status = stage_record(server_root_fd, temp_name, server_owner_uid(),
+                                server_owner_gid(), body, (size_t)count);
+    if (stage_status != 0) {
+        result = stage_status;
         goto cleanup;
     }
     staged = 1;
@@ -2196,14 +2834,19 @@ static int read_revoke_journal(int server_root_fd,
     }
     (void)strcpy(journal->service, value);
     value = journal_field(&cursor, "old_key=");
-    if (!lowercase_hex_is_valid(value, OCRA_KEY_ID_HEX_LENGTH) ||
+    if (!lowercase_hex_is_valid(value, OCRA_KEY_ID_HEX_LENGTH)) {
+        goto cleanup;
+    }
+    (void)strcpy(journal->old_key, value);
+    value = journal_field(&cursor, "old_digest=");
+    if (!lowercase_hex_is_valid(value, OCRA_DIGEST_HEX_LENGTH) ||
         *cursor != '\0' ||
         (strcmp(journal->phase, "preparing") != 0 &&
          strcmp(journal->phase, "prepared") != 0 &&
          strcmp(journal->phase, "committing") != 0)) {
         goto cleanup;
     }
-    (void)strcpy(journal->old_key, value);
+    (void)strcpy(journal->old_digest, value);
     result = 0;
 
 cleanup:
@@ -2244,6 +2887,8 @@ static int recover_revoke(int server_root_fd, int rate_root_fd)
                                   journal.transaction_id) ||
         record_artifact_state(server_fd, backup_name, server_owner_uid(),
                               server_owner_gid(), journal.old_key,
+                              journal.old_digest,
+                              strcmp(journal.phase, "preparing") == 0,
                               &backup_exists) != 0) {
         goto cleanup;
     }
@@ -2252,10 +2897,13 @@ static int recover_revoke(int server_root_fd, int rate_root_fd)
     } else if (strcmp(journal.phase, "prepared") == 0) {
         if (read_record_at(server_fd, server_name, server_owner_uid(),
                            server_owner_gid(), &target_record) != 0 ||
-            strcmp(target_record.key_id, journal.old_key) != 0 ||
+            !record_matches_digest(&target_record, journal.old_key,
+                                   journal.old_digest) ||
             (backup_exists != 0 &&
              (read_record_at(server_fd, backup_name, server_owner_uid(),
                              server_owner_gid(), &backup_record) != 0 ||
+              !record_matches_digest(&backup_record, journal.old_key,
+                                     journal.old_digest) ||
               !records_match(&backup_record, &target_record)))) {
             goto cleanup;
         }
@@ -2263,7 +2911,8 @@ static int recover_revoke(int server_root_fd, int rate_root_fd)
                                          journal.transaction_id) ||
                remove_target_for_key(server_fd, server_name,
                                      server_owner_uid(), server_owner_gid(),
-                                     journal.old_key) != 0 ||
+                                     journal.old_key,
+                                     journal.old_digest) != 0 ||
                !journal_identity_matches(server_root_fd, "revoke",
                                          journal.transaction_id) ||
                enroll_remove_rate(rate_root_fd, journal.uid_text,
@@ -2335,6 +2984,86 @@ cleanup:
     return result;
 }
 
+static int journal_temp_name_is_strict(const char *name)
+{
+    static const char prefix[] = OCRA_ADMIN_JOURNAL_NAME ".ocra-";
+    static const char suffix[] = ".journal";
+    const size_t prefix_length = sizeof(prefix) - 1U;
+    const size_t suffix_length = sizeof(suffix) - 1U;
+    size_t index;
+
+    if (name == NULL ||
+        strlen(name) != prefix_length + OCRA_KEY_ID_HEX_LENGTH +
+                            suffix_length ||
+        memcmp(name, prefix, prefix_length) != 0 ||
+        memcmp(name + prefix_length + OCRA_KEY_ID_HEX_LENGTH, suffix,
+               suffix_length + 1U) != 0) {
+        return 0;
+    }
+    for (index = 0U; index < OCRA_KEY_ID_HEX_LENGTH; ++index) {
+        const char value = name[prefix_length + index];
+
+        if (!((value >= '0' && value <= '9') ||
+              (value >= 'a' && value <= 'f'))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int remove_safe_journal_temps(int server_root_fd)
+{
+    DIR *directory = NULL;
+    struct dirent *entry;
+    int scan_fd = -1;
+    int removed = 0;
+    int result = -1;
+
+    scan_fd = dup(server_root_fd);
+    if (scan_fd < 0 || (directory = fdopendir(scan_fd)) == NULL) {
+        if (scan_fd >= 0) {
+            (void)close(scan_fd);
+        }
+        return -1;
+    }
+    scan_fd = -1;
+    errno = 0;
+    while ((entry = readdir(directory)) != NULL) {
+        int fd;
+
+        if (!journal_temp_name_is_strict(entry->d_name)) {
+            continue;
+        }
+        fd = openat(server_root_fd, entry->d_name,
+                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (fd < 0 ||
+            !metadata_is_file(fd, server_owner_uid(), server_owner_gid()) ||
+            !path_matches_fd(server_root_fd, entry->d_name, fd)) {
+            if (fd >= 0) {
+                (void)close(fd);
+            }
+            goto cleanup;
+        }
+        if (close(fd) != 0 ||
+            unlinkat(server_root_fd, entry->d_name, 0) != 0) {
+            goto cleanup;
+        }
+        removed = 1;
+        errno = 0;
+    }
+    if (errno != 0 ||
+        (removed != 0 && enroll_fsync_directory(server_root_fd) != 0)) {
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    if (closedir(directory) != 0) {
+        result = -1;
+    }
+    return result;
+}
+
 static int recover_pending_transaction(int server_root_fd, int rate_root_fd)
 {
     char operation[8U];
@@ -2342,6 +3071,9 @@ static int recover_pending_transaction(int server_root_fd, int rate_root_fd)
     int result = -1;
 
     (void)memset(operation, 0, sizeof(operation));
+    if (remove_safe_journal_temps(server_root_fd) != 0) {
+        goto cleanup;
+    }
     status = read_pending_operation(server_root_fd, operation);
     if (status == 1) {
         result = 0;
@@ -2352,6 +3084,7 @@ static int recover_pending_transaction(int server_root_fd, int rate_root_fd)
     } else if (status == 0 && strcmp(operation, "revoke") == 0) {
         result = recover_revoke(server_root_fd, rate_root_fd);
     }
+cleanup:
     secure_memory_clear(operation, sizeof(operation));
     return result;
 }
@@ -2375,6 +3108,7 @@ static int enroll_add(int server_root_fd, uid_t uid, gid_t gid,
     char server_temp[NAME_MAX + 1U];
     char client_temp[NAME_MAX + 1U];
     struct enroll_target client;
+    struct enroll_txn_directory client_transaction;
     struct add_journal journal;
     size_t record_length = 0U;
     int server_fd = -1;
@@ -2386,6 +3120,7 @@ static int enroll_add(int server_root_fd, uid_t uid, gid_t gid,
     int leave_transaction = 0;
     int transaction_committed = 0;
     int rollback_failed = 0;
+    int persistence_status;
     int result = -1;
 
     (void)memset(record, 0, sizeof(record));
@@ -2393,6 +3128,7 @@ static int enroll_add(int server_root_fd, uid_t uid, gid_t gid,
     (void)memset(transaction_id, 0, sizeof(transaction_id));
     (void)memset(&journal, 0, sizeof(journal));
     client.directory_fd = -1;
+    client_transaction.fd = -1;
     if (snprintf(server_name, sizeof(server_name), "%s.conf", service) < 0 ||
         open_client_target(client_path, uid, gid, &client) != 0) {
         goto cleanup;
@@ -2403,9 +3139,12 @@ static int enroll_add(int server_root_fd, uid_t uid, gid_t gid,
         !target_is_absent(server_fd, server_name) ||
         !target_is_absent(client.directory_fd, client.name) ||
         build_record(record, &record_length, key_id) != 0 ||
+        digest_bytes(record, record_length, journal.new_digest) != 0 ||
         build_transaction_id(transaction_id) != 0 ||
         format_name(server_temp, server_name, "new", transaction_id) != 0 ||
         format_name(client_temp, client.name, "new", transaction_id) != 0 ||
+        format_transaction_directory_name(journal.client_txn_name,
+                                          transaction_id) != 0 ||
         snprintf(journal.uid_text, sizeof(journal.uid_text), "%s", uid_text) <
             0 ||
         snprintf(journal.service, sizeof(journal.service), "%s", service) < 0 ||
@@ -2420,51 +3159,89 @@ static int enroll_add(int server_root_fd, uid_t uid, gid_t gid,
     journal.gid = gid;
     journal.client_device = client.device;
     journal.client_inode = client.inode;
-    if (write_add_journal(server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal,
-                          "preparing") != 0) {
+    persistence_status = write_add_journal(
+        server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal, "preparing");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     journal_exists = 1;
-    if (stage_record(server_fd, server_temp, server_owner_uid(),
-                     server_owner_gid(), record, record_length) != 0) {
+    if (create_transaction_directory(client.directory_fd, transaction_id,
+                                     &client_transaction) != 0) {
+        goto cleanup;
+    }
+    journal.client_txn_device = client_transaction.device;
+    journal.client_txn_inode = client_transaction.inode;
+    persistence_status = write_add_journal(
+        server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal, "preparing");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
+        goto cleanup;
+    }
+    persistence_status = stage_record(server_fd, server_temp,
+                                      server_owner_uid(), server_owner_gid(),
+                                      record, record_length);
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     server_staged = 1;
-    if (stage_record(client.directory_fd, client_temp, uid, gid, record,
-                     record_length) != 0) {
+    persistence_status = stage_record(client_transaction.fd, client_temp, uid,
+                                      gid, record, record_length);
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     client_staged = 1;
-    if (write_add_journal(server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal,
-                          "prepared") != 0) {
+    persistence_status = write_add_journal(
+        server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal, "prepared");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
-    if (enroll_rename(server_fd, server_temp, server_fd, server_name) != 0) {
+    if (!target_is_absent(server_fd, server_name) ||
+        !target_matches_digest_at(server_fd, server_temp, server_owner_uid(),
+                                  server_owner_gid(), journal.new_key,
+                                  journal.new_digest) ||
+        enroll_rename(server_fd, server_temp, server_fd, server_name) != 0) {
         goto cleanup;
     }
     server_staged = 0;
     server_installed = 1;
-    if (enroll_fsync_directory(server_fd) != 0) {
+    if (enroll_fsync_directory(server_fd) != 0 ||
+        !target_matches_digest_at(server_fd, server_name, server_owner_uid(),
+                                  server_owner_gid(), journal.new_key,
+                                  journal.new_digest)) {
         goto cleanup;
     }
     if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_AFTER_ADD_SERVER) != 0) {
         leave_transaction = 1;
         goto cleanup;
     }
-    if (
-        enroll_rename(client.directory_fd, client_temp, client.directory_fd,
+    if (!target_is_absent(client.directory_fd, client.name) ||
+        !target_matches_digest_at(client_transaction.fd, client_temp, uid, gid,
+                                  journal.new_key, journal.new_digest) ||
+        enroll_rename(client_transaction.fd, client_temp, client.directory_fd,
                       client.name) != 0) {
         goto cleanup;
     }
     client_staged = 0;
     client_installed = 1;
     if (enroll_fsync_directory(client.directory_fd) != 0 ||
-        write_add_journal(server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal,
-                          "committing") != 0) {
+        !target_matches_digest_at(client.directory_fd, client.name, uid, gid,
+                                  journal.new_key, journal.new_digest)) {
+        goto cleanup;
+    }
+    persistence_status = write_add_journal(
+        server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal, "committing");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     transaction_committed = 1;
-    if (remove_admin_journal(server_root_fd, "add", transaction_id) != 0 ||
+    if (remove_transaction_directory(client.directory_fd,
+                                     &client_transaction) != 0 ||
+        remove_admin_journal(server_root_fd, "add", transaction_id) != 0 ||
         fprintf(output, "ocra-enroll: add uid=%s service=%s completed\n",
                 uid_text, service) < 0 ||
         fflush(output) != 0) {
@@ -2495,7 +3272,7 @@ cleanup:
         goto close_and_clear;
     }
     if (client_staged != 0) {
-        (void)unlinkat(client.directory_fd, client_temp, 0);
+        (void)unlinkat(client_transaction.fd, client_temp, 0);
     }
     if (server_staged != 0) {
         (void)unlinkat(server_fd, server_temp, 0);
@@ -2503,12 +3280,19 @@ cleanup:
     if (journal_exists != 0 && transaction_committed == 0) {
         (void)remove_admin_journal(server_root_fd, "add", transaction_id);
     }
+    if (client_transaction.fd >= 0) {
+        (void)remove_transaction_directory(client.directory_fd,
+                                           &client_transaction);
+    }
 close_and_clear:
     if (server_fd >= 0) {
         (void)close(server_fd);
     }
     if (client.directory_fd >= 0) {
         (void)close(client.directory_fd);
+    }
+    if (client_transaction.fd >= 0) {
+        (void)close(client_transaction.fd);
     }
     secure_memory_clear(record, sizeof(record));
     secure_memory_clear(&journal, sizeof(journal));
@@ -2563,6 +3347,7 @@ static int enroll_revoke(int server_root_fd, int rate_root_fd,
     int backup_exists = 0;
     int journal_exists = 0;
     int leave_transaction = 0;
+    int persistence_status;
     int result = -1;
 
     ocra_secret_record_clear(&record);
@@ -2578,6 +3363,7 @@ static int enroll_revoke(int server_root_fd, int rate_root_fd,
         read_record_at(server_fd, server_name, server_owner_uid(),
                        server_owner_gid(), &record) != 0 ||
         serialize_record(&record, serialized, &serialized_length) != 0 ||
+        digest_bytes(serialized, serialized_length, journal.old_digest) != 0 ||
         build_transaction_id(transaction_id) != 0 ||
         format_name(backup_name, server_name, "revoked", transaction_id) != 0 ||
         !target_is_absent(server_fd, backup_name) ||
@@ -2589,23 +3375,35 @@ static int enroll_revoke(int server_root_fd, int rate_root_fd,
     (void)strcpy(journal.transaction_id, transaction_id);
     (void)strcpy(journal.old_key, record.key_id);
     journal.gid = gid;
-    if (write_revoke_journal(server_root_fd, &journal, "preparing") != 0) {
+    persistence_status =
+        write_revoke_journal(server_root_fd, &journal, "preparing");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     journal_exists = 1;
-    if (stage_record(server_fd, backup_name, server_owner_uid(),
-                     server_owner_gid(), serialized, serialized_length) != 0) {
+    persistence_status = stage_record(server_fd, backup_name,
+                                      server_owner_uid(), server_owner_gid(),
+                                      serialized, serialized_length);
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     backup_exists = 1;
-    if (write_revoke_journal(server_root_fd, &journal, "prepared") != 0) {
+    persistence_status =
+        write_revoke_journal(server_root_fd, &journal, "prepared");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_REVOKE) != 0) {
         leave_transaction = 1;
         goto cleanup;
     }
-    if (write_revoke_journal(server_root_fd, &journal, "committing") != 0) {
+    persistence_status =
+        write_revoke_journal(server_root_fd, &journal, "committing");
+    if (persistence_status != 0) {
+        leave_transaction = persistence_status == OCRA_STAGE_INTERRUPTED;
         goto cleanup;
     }
     if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_REVOKE) != 0) {
@@ -2621,7 +3419,8 @@ static int enroll_revoke(int server_root_fd, int rate_root_fd,
         goto cleanup;
     }
     if (remove_target_for_key(server_fd, server_name, server_owner_uid(),
-                              server_owner_gid(), record.key_id) != 0) {
+                              server_owner_gid(), record.key_id,
+                              journal.old_digest) != 0) {
         goto cleanup;
     }
     if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_REVOKE) != 0) {
@@ -2736,8 +3535,18 @@ failure:
 
 cleanup:
     if (admin_lock_fd >= 0) {
-        if (fsync(server_root_fd) != 0 || flock(admin_lock_fd, LOCK_UN) != 0 ||
-            close(admin_lock_fd) != 0) {
+        int cleanup_failed = 0;
+
+        if (finalize_admin_fsync(server_root_fd) != 0) {
+            cleanup_failed = 1;
+        }
+        if (finalize_admin_unlock(admin_lock_fd) != 0) {
+            cleanup_failed = 1;
+        }
+        if (finalize_admin_close(admin_lock_fd) != 0) {
+            cleanup_failed = 1;
+        }
+        if (cleanup_failed != 0) {
             result = 1;
         }
     }
@@ -2888,6 +3697,33 @@ void ocra_enroll_set_fault_for_tests(enum ocra_enroll_fault_operation operation,
     test_fault_operation = operation;
     test_fault_occurrence = occurrence;
     test_fault_seen = 0U;
+}
+
+unsigned int ocra_enroll_get_fault_seen_for_tests(void)
+{
+    return test_fault_seen;
+}
+
+void ocra_enroll_reset_lock_cleanup_counts_for_tests(void)
+{
+    test_lock_fsync_calls = 0U;
+    test_lock_unlock_calls = 0U;
+    test_lock_close_calls = 0U;
+}
+
+void ocra_enroll_get_lock_cleanup_counts_for_tests(unsigned int *fsync_calls,
+                                                   unsigned int *unlock_calls,
+                                                   unsigned int *close_calls)
+{
+    if (fsync_calls != NULL) {
+        *fsync_calls = test_lock_fsync_calls;
+    }
+    if (unlock_calls != NULL) {
+        *unlock_calls = test_lock_unlock_calls;
+    }
+    if (close_calls != NULL) {
+        *close_calls = test_lock_close_calls;
+    }
 }
 
 void ocra_enroll_reset_test_providers(void)

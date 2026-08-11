@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -142,6 +143,10 @@ static void fixture_create(struct enroll_fixture *fixture)
     make_directory(fixture->server_path);
     make_directory(fixture->client_path);
     make_directory(fixture->rate_path);
+    if (geteuid() == (uid_t)0) {
+        require(chown(fixture->client_path, (uid_t)1000, getegid()) == 0,
+                "root harness client directory must belong to test user");
+    }
     fixture->server_fd = open(fixture->server_path,
                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     fixture->rate_fd = open(fixture->rate_path,
@@ -289,7 +294,7 @@ static void fixture_destroy(struct enroll_fixture *fixture)
             "temporary fixture root must be removed");
 }
 
-static char *read_stream(FILE *stream)
+static char *read_stream_binary(FILE *stream, size_t *captured_length)
 {
     long length;
     char *data;
@@ -304,7 +309,15 @@ static char *read_stream(FILE *stream)
     require(data != NULL, "captured stream buffer must allocate");
     require(fread(data, 1U, (size_t)length, stream) == (size_t)length,
             "captured stream must read completely");
+    if (captured_length != NULL) {
+        *captured_length = (size_t)length;
+    }
     return data;
+}
+
+static char *read_stream(FILE *stream)
+{
+    return read_stream_binary(stream, NULL);
 }
 
 static int buffer_contains(const void *buffer, size_t buffer_length,
@@ -375,8 +388,10 @@ static int run_add(struct enroll_fixture *fixture)
     return result;
 }
 
-static int run_rotate(struct enroll_fixture *fixture, const char *response,
-                      char **stdout_text, char **stderr_text)
+static int run_rotate_captured(struct enroll_fixture *fixture,
+                               const char *response, char **stdout_text,
+                               size_t *stdout_length, char **stderr_text,
+                               size_t *stderr_length)
 {
     char *arguments[] = {"ocra-enroll", "rotate", "--user", TEST_USER,
                          "--service", TEST_SERVICE, "--client-profile",
@@ -395,14 +410,21 @@ static int run_rotate(struct enroll_fixture *fixture, const char *response,
                                           fixture->server_fd,
                                           fixture->rate_fd);
     if (stdout_text != NULL) {
-        *stdout_text = read_stream(output);
+        *stdout_text = read_stream_binary(output, stdout_length);
     }
     if (stderr_text != NULL) {
-        *stderr_text = read_stream(error);
+        *stderr_text = read_stream_binary(error, stderr_length);
     }
     require(fclose(input) == 0 && fclose(output) == 0 && fclose(error) == 0,
             "rotation streams must close");
     return result;
+}
+
+static int run_rotate(struct enroll_fixture *fixture, const char *response,
+                      char **stdout_text, char **stderr_text)
+{
+    return run_rotate_captured(fixture, response, stdout_text, NULL,
+                               stderr_text, NULL);
 }
 
 static int run_server_only_command(struct enroll_fixture *fixture,
@@ -549,6 +571,8 @@ static int server_record_exists(struct enroll_fixture *fixture,
 }
 
 static int transaction_journal_exists(struct enroll_fixture *fixture);
+static int transaction_journal_has_phase(struct enroll_fixture *fixture,
+                                         const char *phase);
 
 static void require_pair_absent(struct enroll_fixture *fixture)
 {
@@ -577,6 +601,8 @@ static void test_add_creates_compatible_server_and_client_records(void)
     FILE *error = tmpfile();
     char *stdout_text;
     char *stderr_text;
+    size_t stdout_length;
+    size_t stderr_length;
     int profile_fd;
     ssize_t profile_length;
     struct stat profile_status;
@@ -618,17 +644,17 @@ static void test_add_creates_compatible_server_and_client_records(void)
             "server and client key identifiers must match");
     require(strcmp(server_record.key_id, "8081828384858687") == 0,
             "key identifier must encode exactly eight random bytes");
-    stdout_text = read_stream(output);
-    stderr_text = read_stream(error);
+    stdout_text = read_stream_binary(output, &stdout_length);
+    stderr_text = read_stream_binary(error, &stderr_length);
     require(strstr(stdout_text,
                    "AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWHA5DYPQ") ==
                     NULL &&
                 strstr(stderr_text,
                        "AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWHA5DYPQ") ==
                     NULL &&
-                !buffer_contains(stdout_text, strlen(stdout_text),
+                !buffer_contains(stdout_text, stdout_length,
                                  server_record.secret, OCRA_SECRET_BYTES) &&
-                !buffer_contains(stderr_text, strlen(stderr_text),
+                !buffer_contains(stderr_text, stderr_length,
                                  server_record.secret, OCRA_SECRET_BYTES) &&
                 strstr(stdout_text, "secret=") == NULL &&
                 strstr(stderr_text, "secret=") == NULL &&
@@ -643,6 +669,316 @@ static void test_add_creates_compatible_server_and_client_records(void)
     require(fclose(input) == 0 && fclose(output) == 0 && fclose(error) == 0,
             "test streams must close");
     fixture_destroy(&fixture);
+}
+
+static void test_stream_capture_preserves_embedded_nul_length(void)
+{
+    unsigned char bytes[OCRA_SECRET_BYTES];
+    char *captured;
+    size_t captured_length = 0U;
+    FILE *stream;
+    size_t index;
+
+    for (index = 0U; index < sizeof(bytes); ++index) {
+        bytes[index] = (unsigned char)index;
+    }
+    stream = tmpfile();
+    require(stream != NULL &&
+                fwrite(bytes, 1U, sizeof(bytes), stream) == sizeof(bytes),
+            "binary disclosure fixture must be written completely");
+    captured = read_stream_binary(stream, &captured_length);
+    require(captured_length == sizeof(bytes) &&
+                memcmp(captured, bytes, sizeof(bytes)) == 0,
+            "stream capture length must include bytes after embedded NUL");
+    free(captured);
+    require(fclose(stream) == 0,
+            "binary disclosure fixture stream must close");
+    (void)memset(bytes, 0, sizeof(bytes));
+}
+
+static void test_admin_lock_cleanup_attempts_every_step_after_failures(void)
+{
+    static const enum ocra_enroll_fault_operation faults[] = {
+        OCRA_ENROLL_FAULT_ADMIN_FSYNC,
+        OCRA_ENROLL_FAULT_ADMIN_UNLOCK,
+    };
+    size_t index;
+
+    for (index = 0U; index < sizeof(faults) / sizeof(faults[0]); ++index) {
+        struct enroll_fixture fixture;
+        unsigned int fsync_calls = 0U;
+        unsigned int unlock_calls = 0U;
+        unsigned int close_calls = 0U;
+
+        fixture_create(&fixture);
+        require(run_add(&fixture) == 0,
+                "credential for administrative cleanup fault must add");
+        ocra_enroll_reset_lock_cleanup_counts_for_tests();
+        ocra_enroll_set_fault_for_tests(faults[index], 1U);
+        require(run_server_only_command(&fixture, "inspect", TEST_SERVICE,
+                                        NULL, NULL) != 0,
+                "administrative cleanup fault must fail the invocation");
+        ocra_enroll_get_lock_cleanup_counts_for_tests(
+            &fsync_calls, &unlock_calls, &close_calls);
+        require(fsync_calls == 1U && unlock_calls == 1U && close_calls == 1U,
+                "fsync, unlock and close must all run despite earlier failure");
+        ocra_enroll_set_fault_for_tests(OCRA_ENROLL_FAULT_NONE, 0U);
+        require(run_server_only_command(&fixture, "inspect", TEST_SERVICE,
+                                        NULL, NULL) == 0,
+                "close must release lock even when explicit unlock fails");
+        fixture_destroy(&fixture);
+    }
+}
+
+static void test_add_recovers_crashes_inside_each_staged_write(void)
+{
+    unsigned int occurrence;
+
+    for (occurrence = 1U; occurrence <= 3U; ++occurrence) {
+        struct enroll_fixture fixture;
+        struct ocra_secret_record server_record;
+        struct ocra_secret_record client_record;
+
+        fixture_create(&fixture);
+        ocra_enroll_set_fault_for_tests(
+            OCRA_ENROLL_FAULT_INTERRUPT_STAGE_WRITE, occurrence);
+        require(run_add(&fixture) != 0,
+                "stage-write process interruption must stop add");
+        ocra_enroll_set_fault_for_tests(OCRA_ENROLL_FAULT_NONE, 0U);
+        require(run_add(&fixture) == 0,
+                "next add must recover bootstrap/server/client partial stage");
+        require(ocra_secret_store_load_at(
+                    fixture.server_fd, TEST_UID_TEXT, TEST_SERVICE,
+                    &server_record) == 0,
+                "recovered add server record must load");
+        load_client_record(&fixture, &client_record);
+        require(records_match_for_test(&server_record, &client_record) &&
+                    !transaction_journal_exists(&fixture),
+                "stage-write recovery must converge to one committed pair");
+        ocra_secret_record_clear(&client_record);
+        ocra_secret_record_clear(&server_record);
+        fixture_destroy(&fixture);
+    }
+}
+
+static void test_add_preserves_precreated_client_transaction_name(void)
+{
+    struct enroll_fixture fixture;
+    static const char body[] = "attacker-owned\n";
+    char transaction_path[256];
+    struct stat before;
+    struct stat after;
+    int fd;
+
+    fixture_create(&fixture);
+    require(snprintf(transaction_path, sizeof(transaction_path),
+                     "%s/.ocra-admin-9091929394959697",
+                     fixture.client_path) > 0,
+            "deterministic client transaction path must format");
+    fd = open(transaction_path,
+              O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    require(fd >= 0 &&
+                write(fd, body, sizeof(body) - 1U) ==
+                    (ssize_t)(sizeof(body) - 1U) &&
+                close(fd) == 0 &&
+                lstat(transaction_path, &before) == 0,
+            "attacker transaction-name entry must be created");
+    require(run_add(&fixture) != 0,
+            "precreated transaction-name entry must fail closed");
+    require(lstat(transaction_path, &after) == 0 &&
+                before.st_dev == after.st_dev &&
+                before.st_ino == after.st_ino &&
+                before.st_size == after.st_size &&
+                !server_record_exists(&fixture, TEST_SERVICE),
+            "failed add must preserve the precreated entry and server state");
+    fixture_destroy(&fixture);
+}
+
+static void test_add_preserves_precreated_transaction_symlink_and_hardlink(void)
+{
+    unsigned int kind;
+
+    for (kind = 0U; kind < 2U; ++kind) {
+        struct enroll_fixture fixture;
+        static const char body[] = "attacker-referent\n";
+        char transaction_path[256];
+        char sentinel_path[256];
+        struct stat before;
+        struct stat after;
+        struct stat sentinel_before;
+        struct stat sentinel_after;
+        int fd;
+
+        fixture_create(&fixture);
+        require(snprintf(transaction_path, sizeof(transaction_path),
+                         "%s/.ocra-admin-9091929394959697",
+                         fixture.client_path) > 0 &&
+                    snprintf(sentinel_path, sizeof(sentinel_path),
+                             "%s/attacker-referent", fixture.root_path) > 0,
+                "adversarial transaction paths must format");
+        fd = open(sentinel_path,
+                  O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        require(fd >= 0 &&
+                    write(fd, body, sizeof(body) - 1U) ==
+                        (ssize_t)(sizeof(body) - 1U) &&
+                    close(fd) == 0,
+                "adversarial transaction referent must be created");
+        require((kind == 0U ? symlink(sentinel_path, transaction_path)
+                            : link(sentinel_path, transaction_path)) == 0 &&
+                    lstat(transaction_path, &before) == 0 &&
+                    stat(sentinel_path, &sentinel_before) == 0,
+                "adversarial transaction entry must be installed");
+        require(run_add(&fixture) != 0,
+                "unsafe transaction entry must fail closed");
+        require(lstat(transaction_path, &after) == 0 &&
+                    stat(sentinel_path, &sentinel_after) == 0 &&
+                    before.st_dev == after.st_dev &&
+                    before.st_ino == after.st_ino &&
+                    sentinel_before.st_dev == sentinel_after.st_dev &&
+                    sentinel_before.st_ino == sentinel_after.st_ino &&
+                    sentinel_before.st_size == sentinel_after.st_size &&
+                    !server_record_exists(&fixture, TEST_SERVICE),
+                "unsafe transaction entry and referent must remain untouched");
+        fixture_destroy(&fixture);
+    }
+}
+
+static void test_owner_mismatch_rejects_user_owned_transaction_directory(void)
+{
+    struct enroll_fixture fixture;
+    char transaction_path[256];
+    struct stat before;
+    struct stat after;
+
+    if (getenv("OCRA_TEST_REQUIRE_ENROLL_OWNER_MISMATCH") == NULL) {
+        return;
+    }
+    require(geteuid() == (uid_t)0 && geteuid() != (uid_t)1000,
+            "owner-mismatch harness must execute as administrative root");
+    fixture_create(&fixture);
+    require(snprintf(transaction_path, sizeof(transaction_path),
+                     "%s/.ocra-admin-9091929394959697",
+                     fixture.client_path) > 0 &&
+                mkdir(transaction_path, 0700) == 0 &&
+                chown(transaction_path, (uid_t)1000, getegid()) == 0 &&
+                lstat(transaction_path, &before) == 0 &&
+                before.st_uid == (uid_t)1000,
+            "user-owned transaction directory must be precreated");
+    require(run_add(&fixture) != 0,
+            "user-owned transaction directory must fail closed");
+    require(lstat(transaction_path, &after) == 0 &&
+                before.st_dev == after.st_dev &&
+                before.st_ino == after.st_ino &&
+                after.st_uid == (uid_t)1000 &&
+                !server_record_exists(&fixture, TEST_SERVICE) &&
+                transaction_journal_exists(&fixture),
+            "owner-mismatch rejection must preserve attacker entry and intent");
+    fixture_destroy(&fixture);
+}
+
+static void test_rotation_recovers_partial_restore_stages(void)
+{
+    static const struct {
+        enum ocra_enroll_fault_operation fault;
+        unsigned int first_occurrence;
+        unsigned int last_occurrence;
+    } cases[] = {
+        {OCRA_ENROLL_FAULT_INTERRUPT_STAGE_WRITE, 8U, 8U},
+        {OCRA_ENROLL_FAULT_INTERRUPT_STAGE_FSYNC, 15U, 16U},
+    };
+    static const char invalid_response[] = "00000000\n";
+    size_t test_case;
+
+    for (test_case = 0U; test_case < sizeof(cases) / sizeof(cases[0]);
+         ++test_case) {
+        unsigned int occurrence;
+
+        for (occurrence = cases[test_case].first_occurrence;
+             occurrence <= cases[test_case].last_occurrence; ++occurrence) {
+            struct enroll_fixture fixture;
+            struct ocra_secret_record old_record;
+            struct ocra_secret_record server_record;
+            struct ocra_secret_record client_record;
+
+            fixture_create(&fixture);
+            require(run_add(&fixture) == 0 &&
+                        ocra_secret_store_load_at(
+                            fixture.server_fd, TEST_UID_TEXT, TEST_SERVICE,
+                            &old_record) == 0,
+                    "partial restore fixture must start with an old pair");
+            ocra_enroll_set_fault_for_tests(cases[test_case].fault,
+                                            occurrence);
+            require(run_rotate(&fixture, invalid_response, NULL, NULL) != 0 &&
+                        transaction_journal_has_phase(&fixture, "prepared"),
+                    "restore stage interruption must preserve recovery intent");
+            ocra_enroll_set_fault_for_tests(OCRA_ENROLL_FAULT_NONE, 0U);
+            require(run_server_only_command(&fixture, "inspect", TEST_SERVICE,
+                                            NULL, NULL) == 0 &&
+                        ocra_secret_store_load_at(
+                            fixture.server_fd, TEST_UID_TEXT, TEST_SERVICE,
+                            &server_record) == 0,
+                    "next invocation must recover a partial restore stage");
+            load_client_record(&fixture, &client_record);
+            require(records_match_for_test(&old_record, &server_record) &&
+                        records_match_for_test(&old_record, &client_record) &&
+                        !transaction_journal_exists(&fixture),
+                    "partial restore recovery must converge to the old pair");
+            ocra_secret_record_clear(&client_record);
+            ocra_secret_record_clear(&server_record);
+            ocra_secret_record_clear(&old_record);
+            fixture_destroy(&fixture);
+        }
+    }
+}
+
+static void test_revoke_recovers_partial_backup_stage(void)
+{
+    static const struct {
+        enum ocra_enroll_fault_operation fault;
+        unsigned int first_occurrence;
+        unsigned int last_occurrence;
+    } cases[] = {
+        {OCRA_ENROLL_FAULT_INTERRUPT_STAGE_WRITE, 2U, 2U},
+        {OCRA_ENROLL_FAULT_INTERRUPT_STAGE_FSYNC, 3U, 4U},
+    };
+    size_t test_case;
+
+    for (test_case = 0U; test_case < sizeof(cases) / sizeof(cases[0]);
+         ++test_case) {
+        unsigned int occurrence;
+
+        for (occurrence = cases[test_case].first_occurrence;
+             occurrence <= cases[test_case].last_occurrence; ++occurrence) {
+            struct enroll_fixture fixture;
+            struct ocra_secret_record old_record;
+            struct ocra_secret_record current;
+
+            fixture_create(&fixture);
+            require(run_add(&fixture) == 0 &&
+                        ocra_secret_store_load_at(
+                            fixture.server_fd, TEST_UID_TEXT, TEST_SERVICE,
+                            &old_record) == 0,
+                    "partial revoke fixture must start with a credential");
+            ocra_enroll_set_fault_for_tests(cases[test_case].fault,
+                                            occurrence);
+            require(run_server_only_command(&fixture, "revoke", TEST_SERVICE,
+                                            NULL, NULL) != 0 &&
+                        transaction_journal_has_phase(&fixture, "preparing"),
+                    "revoke backup interruption must preserve PREPARING intent");
+            ocra_enroll_set_fault_for_tests(OCRA_ENROLL_FAULT_NONE, 0U);
+            require(run_server_only_command(&fixture, "inspect", TEST_SERVICE,
+                                            NULL, NULL) == 0 &&
+                        ocra_secret_store_load_at(
+                            fixture.server_fd, TEST_UID_TEXT, TEST_SERVICE,
+                            &current) == 0 &&
+                        records_match_for_test(&old_record, &current) &&
+                        !transaction_journal_exists(&fixture),
+                    "partial revoke backup recovery must preserve old state");
+            ocra_secret_record_clear(&current);
+            ocra_secret_record_clear(&old_record);
+            fixture_destroy(&fixture);
+        }
+    }
 }
 
 static void test_cli_rejects_secret_options_relative_paths_and_random_failure(void)
@@ -853,6 +1189,8 @@ static void test_rotate_confirms_externally_then_retires_old_credential(void)
     char reserved[OCRA_CHALLENGE_DIGITS + 1U];
     char *stdout_text = NULL;
     char *stderr_text = NULL;
+    size_t stdout_length = 0U;
+    size_t stderr_length = 0U;
     size_t index;
 
     fixture_create(&fixture);
@@ -876,7 +1214,9 @@ static void test_rotate_confirms_externally_then_retires_old_credential(void)
             "independent client response must compute");
     require(strcat(response, "\n") != NULL,
             "confirmation response must include line ending");
-    require(run_rotate(&fixture, response, &stdout_text, &stderr_text) == 0,
+    require(run_rotate_captured(&fixture, response, &stdout_text,
+                                &stdout_length, &stderr_text,
+                                &stderr_length) == 0,
             "rotation with independently produced response must succeed");
     require(strstr(stdout_text, "0000000001") != NULL,
             "rotation must present the independent confirmation challenge");
@@ -899,9 +1239,9 @@ static void test_rotate_confirms_externally_then_retires_old_credential(void)
                 strstr(stderr_text,
                        "IBAUEQ2EIVDEOSCJJJFUYTKOJ5IFCUSTKRKVMV2YLFNFWXC5LZPQ") ==
                     NULL &&
-                !buffer_contains(stdout_text, strlen(stdout_text),
+                !buffer_contains(stdout_text, stdout_length,
                                  server_record.secret, OCRA_SECRET_BYTES) &&
-                !buffer_contains(stderr_text, strlen(stderr_text),
+                !buffer_contains(stderr_text, stderr_length,
                                  server_record.secret, OCRA_SECRET_BYTES),
             "rotation output must hide encoded and decoded secret bytes");
     require(!rate_state_exists(&fixture, old_record.key_id),
@@ -1206,6 +1546,8 @@ static void test_next_rotation_recovers_interrupted_client_install(void)
     char response[10U];
     char *stdout_text = NULL;
     char *stderr_text = NULL;
+    size_t stdout_length = 0U;
+    size_t stderr_length = 0U;
     ssize_t journal_length;
     int journal_fd;
 
@@ -1218,7 +1560,9 @@ static void test_next_rotation_recovers_interrupted_client_install(void)
     compute_second_credential_response(response);
     ocra_enroll_set_fault_for_tests(
         OCRA_ENROLL_FAULT_INTERRUPT_AFTER_CLIENT, 1U);
-    require(run_rotate(&fixture, response, &stdout_text, &stderr_text) != 0,
+    require(run_rotate_captured(&fixture, response, &stdout_text,
+                                &stdout_length, &stderr_text,
+                                &stderr_length) != 0,
             "simulated process interruption must stop rotation");
     require(transaction_journal_exists(&fixture),
             "interrupted rotation must leave a durable recovery journal");
@@ -1249,9 +1593,9 @@ static void test_next_rotation_recovers_interrupted_client_install(void)
                 strstr(stderr_text,
                        "IBAUEQ2EIVDEOSCJJJFUYTKOJ5IFCUSTKRKVMV2YLFNFWXC5LZPQ") ==
                     NULL &&
-                !buffer_contains(stdout_text, strlen(stdout_text),
+                !buffer_contains(stdout_text, stdout_length,
                                  current.secret, OCRA_SECRET_BYTES) &&
-                !buffer_contains(stderr_text, strlen(stderr_text),
+                !buffer_contains(stderr_text, stderr_length,
                                  current.secret, OCRA_SECRET_BYTES),
             "journal and failure output must hide encoded and raw secret");
     ocra_enroll_set_fault_for_tests(OCRA_ENROLL_FAULT_NONE, 0U);
@@ -1622,15 +1966,15 @@ static void test_rotate_prepares_every_durable_participant_before_journal(void)
     static const struct {
         unsigned int occurrence;
         size_t server_entries;
-        size_t client_entries;
+        size_t transaction_entries;
         const char *phase;
     } checkpoints[] = {
-        {1U, 1U, 1U, "preparing"},
-        {2U, 2U, 1U, "preparing"},
-        {3U, 2U, 2U, "preparing"},
-        {4U, 3U, 2U, "preparing"},
-        {5U, 3U, 3U, "preparing"},
-        {6U, 3U, 3U, "prepared"},
+        {1U, 1U, 0U, "preparing"},
+        {2U, 2U, 0U, "preparing"},
+        {3U, 2U, 1U, "preparing"},
+        {4U, 3U, 1U, "preparing"},
+        {5U, 3U, 2U, "preparing"},
+        {6U, 3U, 2U, "prepared"},
     };
     size_t index;
 
@@ -1640,6 +1984,8 @@ static void test_rotate_prepares_every_durable_participant_before_journal(void)
         static const char invalid_response[] = "00000000\n";
         int server_scope_fd;
         int client_fd;
+        int transaction_fd;
+        struct stat transaction_status;
 
         fixture_create(&fixture);
         require(run_add(&fixture) == 0,
@@ -1653,14 +1999,24 @@ static void test_rotate_prepares_every_durable_participant_before_journal(void)
                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         require(client_fd >= 0,
                 "preparation checkpoint client directory must open");
+        transaction_fd = openat(client_fd,
+                                ".ocra-admin-b0b1b2b3b4b5b6b7",
+                                O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
+                                    O_CLOEXEC);
+        require(transaction_fd >= 0 &&
+                    fstat(transaction_fd, &transaction_status) == 0 &&
+                    (transaction_status.st_mode & 07777) == 0700,
+                "preparation artifacts must use a private transaction directory");
         require(directory_entry_count(server_scope_fd) ==
                         checkpoints[index].server_entries &&
-                    directory_entry_count(client_fd) ==
-                        checkpoints[index].client_entries &&
+                    directory_entry_count(client_fd) == 2U &&
+                    directory_entry_count(transaction_fd) ==
+                        checkpoints[index].transaction_entries &&
                     transaction_journal_has_phase(&fixture,
                                                   checkpoints[index].phase),
                 "PREPARED visibility must follow all durable participants");
-        require(close(client_fd) == 0 && close(server_scope_fd) == 0,
+        require(close(transaction_fd) == 0 && close(client_fd) == 0 &&
+                    close(server_scope_fd) == 0,
                 "preparation checkpoint directories must close");
         fixture_destroy(&fixture);
     }
@@ -1900,7 +2256,7 @@ static void test_preparing_cleanup_is_repeatable_and_never_changes_targets(void)
                                         1U);
         require(run_server_only_command(&fixture, "inspect", TEST_SERVICE,
                                         NULL, NULL) != 0 &&
-                    transaction_journal_has_phase(&fixture, "preparing"),
+                    transaction_journal_has_phase(&fixture, "cleanup"),
                 "each PREPARING cleanup crash must leave retryable intent");
         require(ocra_secret_store_load_at(fixture.server_fd, TEST_UID_TEXT,
                                           TEST_SERVICE, &current) == 0 &&
@@ -1922,23 +2278,35 @@ static void test_preparing_cleanup_is_repeatable_and_never_changes_targets(void)
 
 static void test_rotate_fault_matrix_converges_without_mixed_pair(void)
 {
-    static const struct {
-        enum ocra_enroll_fault_operation fault;
-        unsigned int last_occurrence;
-    } matrices[] = {
-        {OCRA_ENROLL_FAULT_WRITE_PARTIAL, 7U},
-        {OCRA_ENROLL_FAULT_FSYNC_FILE, 7U},
-        {OCRA_ENROLL_FAULT_RENAME, 5U},
-        {OCRA_ENROLL_FAULT_FSYNC_DIRECTORY, 12U},
+    static const enum ocra_enroll_fault_operation matrices[] = {
+        OCRA_ENROLL_FAULT_WRITE_PARTIAL,
+        OCRA_ENROLL_FAULT_FSYNC_FILE,
+        OCRA_ENROLL_FAULT_RENAME,
+        OCRA_ENROLL_FAULT_FSYNC_DIRECTORY,
     };
     size_t matrix;
 
     for (matrix = 0U; matrix < sizeof(matrices) / sizeof(matrices[0]);
          ++matrix) {
+        struct enroll_fixture calibration;
+        char calibration_response[10U];
+        unsigned int last_occurrence;
         unsigned int occurrence;
 
-        for (occurrence = 1U; occurrence <= matrices[matrix].last_occurrence;
-             ++occurrence) {
+        fixture_create(&calibration);
+        require(run_add(&calibration) == 0,
+                "rotation matrix calibration credential must add");
+        compute_second_credential_response(calibration_response);
+        ocra_enroll_set_fault_for_tests(matrices[matrix], UINT_MAX);
+        require(run_rotate(&calibration, calibration_response, NULL, NULL) ==
+                    0,
+                "rotation matrix calibration must complete without injection");
+        last_occurrence = ocra_enroll_get_fault_seen_for_tests();
+        require(last_occurrence > 0U,
+                "rotation matrix must observe at least one boundary");
+        fixture_destroy(&calibration);
+
+        for (occurrence = 1U; occurrence <= last_occurrence; ++occurrence) {
             struct enroll_fixture fixture;
             struct ocra_secret_record old_record;
             struct ocra_secret_record server_record;
@@ -1957,8 +2325,7 @@ static void test_rotate_fault_matrix_converges_without_mixed_pair(void)
                             old_record.key_id, rate_challenge) == 0,
                     "rotation fault matrix fixture must be complete");
             compute_second_credential_response(response);
-            ocra_enroll_set_fault_for_tests(matrices[matrix].fault,
-                                            occurrence);
+            ocra_enroll_set_fault_for_tests(matrices[matrix], occurrence);
             require(run_rotate(&fixture, response, NULL, NULL) != 0,
                     "injected rotation persistence boundary must fail");
             ocra_enroll_set_fault_for_tests(OCRA_ENROLL_FAULT_NONE, 0U);
@@ -1985,8 +2352,229 @@ static void test_rotate_fault_matrix_converges_without_mixed_pair(void)
     }
 }
 
+static void test_add_fault_matrix_recalibrates_and_converges(void)
+{
+    static const enum ocra_enroll_fault_operation matrices[] = {
+        OCRA_ENROLL_FAULT_WRITE_PARTIAL,
+        OCRA_ENROLL_FAULT_FSYNC_FILE,
+        OCRA_ENROLL_FAULT_RENAME,
+        OCRA_ENROLL_FAULT_FSYNC_DIRECTORY,
+    };
+    size_t matrix;
+
+    for (matrix = 0U; matrix < sizeof(matrices) / sizeof(matrices[0]);
+         ++matrix) {
+        struct enroll_fixture calibration;
+        unsigned int last_occurrence;
+        unsigned int occurrence;
+
+        fixture_create(&calibration);
+        ocra_enroll_set_fault_for_tests(matrices[matrix], UINT_MAX);
+        require(run_add(&calibration) == 0,
+                "add matrix calibration must complete without injection");
+        last_occurrence = ocra_enroll_get_fault_seen_for_tests();
+        require(last_occurrence > 0U,
+                "add matrix must observe at least one boundary");
+        fixture_destroy(&calibration);
+
+        for (occurrence = 1U; occurrence <= last_occurrence; ++occurrence) {
+            struct enroll_fixture fixture;
+            struct ocra_secret_record server_record;
+            struct ocra_secret_record client_record;
+            struct stat status;
+            int inspect_result;
+
+            fixture_create(&fixture);
+            ocra_enroll_set_fault_for_tests(matrices[matrix], occurrence);
+            require(run_add(&fixture) != 0,
+                    "injected add persistence boundary must fail");
+            ocra_enroll_set_fault_for_tests(OCRA_ENROLL_FAULT_NONE, 0U);
+            inspect_result = run_server_only_command(
+                &fixture, "inspect", TEST_SERVICE, NULL, NULL);
+            if (server_record_exists(&fixture, TEST_SERVICE)) {
+                require(inspect_result == 0 &&
+                            ocra_secret_store_load_at(
+                                fixture.server_fd, TEST_UID_TEXT,
+                                TEST_SERVICE, &server_record) == 0,
+                        "committed add fault must retain readable server state");
+                load_client_record(&fixture, &client_record);
+                require(records_match_for_test(&server_record,
+                                               &client_record),
+                        "committed add fault must converge to a matching pair");
+                ocra_secret_record_clear(&client_record);
+                ocra_secret_record_clear(&server_record);
+            } else {
+                require(inspect_result != 0 &&
+                            fstatat(AT_FDCWD, fixture.profile_path, &status,
+                                    AT_SYMLINK_NOFOLLOW) != 0 &&
+                            errno == ENOENT && run_add(&fixture) == 0,
+                        "rolled-back add fault must permit a clean retry");
+            }
+            require(!transaction_journal_exists(&fixture),
+                    "add fault convergence must consume recovery intent");
+            fixture_destroy(&fixture);
+        }
+    }
+}
+
+static void test_revoke_fault_matrix_recalibrates_and_converges(void)
+{
+    static const enum ocra_enroll_fault_operation matrices[] = {
+        OCRA_ENROLL_FAULT_WRITE_PARTIAL,
+        OCRA_ENROLL_FAULT_FSYNC_FILE,
+        OCRA_ENROLL_FAULT_RENAME,
+        OCRA_ENROLL_FAULT_FSYNC_DIRECTORY,
+    };
+    size_t matrix;
+
+    for (matrix = 0U; matrix < sizeof(matrices) / sizeof(matrices[0]);
+         ++matrix) {
+        struct enroll_fixture calibration;
+        unsigned int last_occurrence;
+        unsigned int occurrence;
+
+        fixture_create(&calibration);
+        require(run_add(&calibration) == 0,
+                "revoke matrix calibration credential must add");
+        ocra_enroll_set_fault_for_tests(matrices[matrix], UINT_MAX);
+        require(run_server_only_command(&calibration, "revoke", TEST_SERVICE,
+                                        NULL, NULL) == 0,
+                "revoke matrix calibration must complete without injection");
+        last_occurrence = ocra_enroll_get_fault_seen_for_tests();
+        require(last_occurrence > 0U,
+                "revoke matrix must observe at least one boundary");
+        fixture_destroy(&calibration);
+
+        for (occurrence = 1U; occurrence <= last_occurrence; ++occurrence) {
+            struct enroll_fixture fixture;
+            struct ocra_secret_record old_record;
+            struct ocra_secret_record current;
+            char challenge[OCRA_CHALLENGE_DIGITS + 1U];
+            int inspect_result;
+
+            fixture_create(&fixture);
+            require(run_add(&fixture) == 0 &&
+                        ocra_secret_store_load_at(
+                            fixture.server_fd, TEST_UID_TEXT, TEST_SERVICE,
+                            &old_record) == 0 &&
+                        ocra_rate_limit_reserve_at(
+                            fixture.rate_fd, TEST_UID_TEXT, TEST_SERVICE,
+                            old_record.key_id, challenge) == 0,
+                    "revoke matrix fixture must include credential and rate state");
+            ocra_enroll_set_fault_for_tests(matrices[matrix], occurrence);
+            require(run_server_only_command(&fixture, "revoke", TEST_SERVICE,
+                                            NULL, NULL) != 0,
+                    "injected revoke persistence boundary must fail");
+            ocra_enroll_set_fault_for_tests(OCRA_ENROLL_FAULT_NONE, 0U);
+            inspect_result = run_server_only_command(
+                &fixture, "inspect", TEST_SERVICE, NULL, NULL);
+            if (server_record_exists(&fixture, TEST_SERVICE)) {
+                require(inspect_result == 0 &&
+                            ocra_secret_store_load_at(
+                                fixture.server_fd, TEST_UID_TEXT,
+                                TEST_SERVICE, &current) == 0 &&
+                            records_match_for_test(&old_record, &current) &&
+                            rate_state_exists(&fixture, old_record.key_id),
+                        "rolled-back revoke must preserve credential and rate state");
+                ocra_secret_record_clear(&current);
+            } else {
+                require(inspect_result != 0 &&
+                            !rate_state_exists(&fixture, old_record.key_id),
+                        "committing revoke must retire credential and rate state");
+            }
+            require(!transaction_journal_exists(&fixture),
+                    "revoke fault convergence must consume recovery intent");
+            ocra_secret_record_clear(&old_record);
+            fixture_destroy(&fixture);
+        }
+    }
+}
+
+static void test_recovery_fault_matrix_recalibrates_and_converges(void)
+{
+    static const enum ocra_enroll_fault_operation matrices[] = {
+        OCRA_ENROLL_FAULT_WRITE_PARTIAL,
+        OCRA_ENROLL_FAULT_FSYNC_FILE,
+        OCRA_ENROLL_FAULT_RENAME,
+        OCRA_ENROLL_FAULT_FSYNC_DIRECTORY,
+    };
+    size_t matrix;
+
+    for (matrix = 0U; matrix < sizeof(matrices) / sizeof(matrices[0]);
+         ++matrix) {
+        struct enroll_fixture calibration;
+        static const char invalid_response[] = "00000000\n";
+        unsigned int last_occurrence;
+        unsigned int occurrence;
+
+        fixture_create(&calibration);
+        require(run_add(&calibration) == 0,
+                "recovery matrix calibration credential must add");
+        ocra_enroll_set_fault_for_tests(
+            OCRA_ENROLL_FAULT_INTERRUPT_AFTER_CLIENT, 1U);
+        require(run_rotate(&calibration, invalid_response, NULL, NULL) != 0 &&
+                    transaction_journal_has_phase(&calibration, "prepared"),
+                "recovery matrix calibration must leave PREPARED intent");
+        ocra_enroll_set_fault_for_tests(matrices[matrix], UINT_MAX);
+        require(run_server_only_command(&calibration, "inspect", TEST_SERVICE,
+                                        NULL, NULL) == 0,
+                "recovery matrix calibration must converge without injection");
+        last_occurrence = ocra_enroll_get_fault_seen_for_tests();
+        require(last_occurrence > 0U,
+                "recovery matrix must observe at least one boundary");
+        fixture_destroy(&calibration);
+
+        for (occurrence = 1U; occurrence <= last_occurrence; ++occurrence) {
+            struct enroll_fixture fixture;
+            struct ocra_secret_record old_record;
+            struct ocra_secret_record server_record;
+            struct ocra_secret_record client_record;
+
+            fixture_create(&fixture);
+            require(run_add(&fixture) == 0 &&
+                        ocra_secret_store_load_at(
+                            fixture.server_fd, TEST_UID_TEXT, TEST_SERVICE,
+                            &old_record) == 0,
+                    "recovery matrix fixture must start with old state");
+            ocra_enroll_set_fault_for_tests(
+                OCRA_ENROLL_FAULT_INTERRUPT_AFTER_CLIENT, 1U);
+            require(run_rotate(&fixture, invalid_response, NULL, NULL) != 0 &&
+                        transaction_journal_has_phase(&fixture, "prepared"),
+                    "recovery matrix fixture must leave PREPARED intent");
+            ocra_enroll_set_fault_for_tests(matrices[matrix], occurrence);
+            require(run_server_only_command(&fixture, "inspect", TEST_SERVICE,
+                                            NULL, NULL) != 0,
+                    "injected recovery persistence boundary must fail");
+            ocra_enroll_set_fault_for_tests(OCRA_ENROLL_FAULT_NONE, 0U);
+            require(run_server_only_command(&fixture, "inspect", TEST_SERVICE,
+                                            NULL, NULL) == 0 &&
+                        ocra_secret_store_load_at(
+                            fixture.server_fd, TEST_UID_TEXT, TEST_SERVICE,
+                            &server_record) == 0,
+                    "second recovery invocation must converge");
+            load_client_record(&fixture, &client_record);
+            require(records_match_for_test(&old_record, &server_record) &&
+                        records_match_for_test(&old_record, &client_record) &&
+                        !transaction_journal_exists(&fixture),
+                    "recovery fault matrix must converge to the old pair");
+            ocra_secret_record_clear(&client_record);
+            ocra_secret_record_clear(&server_record);
+            ocra_secret_record_clear(&old_record);
+            fixture_destroy(&fixture);
+        }
+    }
+}
+
 int main(void)
 {
+    test_stream_capture_preserves_embedded_nul_length();
+    test_admin_lock_cleanup_attempts_every_step_after_failures();
+    test_add_recovers_crashes_inside_each_staged_write();
+    test_add_preserves_precreated_client_transaction_name();
+    test_add_preserves_precreated_transaction_symlink_and_hardlink();
+    test_owner_mismatch_rejects_user_owned_transaction_directory();
+    test_rotation_recovers_partial_restore_stages();
+    test_revoke_recovers_partial_backup_stage();
     test_add_creates_compatible_server_and_client_records();
     test_cli_rejects_secret_options_relative_paths_and_random_failure();
     test_add_rejects_unknown_user_invalid_service_and_non_root();
@@ -2013,6 +2601,9 @@ int main(void)
     test_recovery_rejects_replaced_original_client_directory();
     test_preparing_cleanup_is_repeatable_and_never_changes_targets();
     test_rotate_fault_matrix_converges_without_mixed_pair();
+    test_add_fault_matrix_recalibrates_and_converges();
+    test_revoke_fault_matrix_recalibrates_and_converges();
+    test_recovery_fault_matrix_recalibrates_and_converges();
     test_revoke_cannot_be_undone_by_pending_rotation_recovery();
     return EXIT_SUCCESS;
 }
