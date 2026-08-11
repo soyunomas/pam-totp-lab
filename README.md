@@ -164,7 +164,7 @@ Implementa desafío-respuesta OCRA con suite fija `OCRA-1:HOTP-SHA256-8:QN10`.
 
 - Credenciales independientes por usuario y servicio.
 - Desafíos recientes no reutilizables y rate limiting concurrente.
-- Cliente de terminal, aplicación Android Flutter y herramienta de alta por QR, rotación y revocación incluidos.
+- Cliente de terminal, [APK Android release](./pam_ocra_challenge/app/ocra-client-android-release.apk), código Flutter y herramienta de alta por QR, rotación y revocación incluidos.
 - Implementación completa; piloto manual pendiente y no aprobada para producción.
 - [Documentación](./pam_ocra_challenge/README.md)
 

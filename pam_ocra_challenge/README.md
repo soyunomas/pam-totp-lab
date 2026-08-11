@@ -63,7 +63,9 @@ Instala el perfil en `~/.config/pam-ocra-client/<nombre>` con directorio no escr
 ocra-client --profile <nombre>
 ```
 
-Para Android, compila e instala [OCRA Client](./mobile/README.md), pulsa
+Para Android, instala el
+[APK release optimizado](./app/ocra-client-android-release.apk) o compila
+[OCRA Client](./mobile/README.md) desde el código fuente, pulsa
 **Enrolar** y escanea el QR mostrado en la terminal. En cada acceso introduce
 en la app el desafío de 10 dígitos que muestra PAM y devuelve por SSH la
 respuesta de 8 dígitos. El URI secreto se entrega a `/usr/bin/qrencode` por
