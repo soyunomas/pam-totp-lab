@@ -111,6 +111,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     uid_t uid = (uid_t)-1;
     int fake_mode = 0;
     int message_length;
+    int conversation_status;
     int result = PAM_AUTH_ERR;
 
     (void)flags;
@@ -149,15 +150,19 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
                               "Desafío OCRA para %s: %s", service,
                               challenge);
     if (message_length < 0 || (size_t)message_length >= sizeof(message) ||
-        pam_info(pamh, "%s", message) != PAM_SUCCESS ||
-        pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &response, "%s",
-                   "Respuesta OCRA: ") != PAM_SUCCESS) {
+        pam_info(pamh, "%s", message) != PAM_SUCCESS) {
         syslog(LOG_NOTICE, "pam_ocra_challenge: conversation failed");
         goto cleanup;
     }
+    conversation_status = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &response,
+                                     "%s", "Respuesta OCRA: ");
     if (response != NULL) {
         response_length =
             strnlen(response, OCRA_PAM_RESPONSE_SCAN_LIMIT);
+    }
+    if (conversation_status != PAM_SUCCESS) {
+        syslog(LOG_NOTICE, "pam_ocra_challenge: conversation failed");
+        goto cleanup;
     }
     if (ocra_compute_response(record.secret, OCRA_SECRET_BYTES, challenge,
                               OCRA_CHALLENGE_DIGITS, expected,

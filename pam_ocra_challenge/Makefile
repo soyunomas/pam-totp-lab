@@ -221,12 +221,12 @@ $(OCRA_ENROLL): tools/ocra_enroll.c tools/ocra_enroll.h secret_store.c \
 $(MODULE_TEST): tests/test_module.c pam_ocra_challenge.c \
 		tests/stubs/security/pam_modules.h \
 		tests/stubs/security/pam_ext.h ocra_core.c ocra_core.h ocra_suite.c \
-		ocra_suite.h secure_memory.c secure_memory.h secret_store.h \
+		ocra_suite.h secure_memory.h secret_store.h \
 		rate_limit.h scope.c scope.h
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -Itests/stubs \
 		tests/test_module.c pam_ocra_challenge.c ocra_core.c ocra_suite.c \
-		secure_memory.c scope.c -o $@ -lcrypto $(LDFLAGS) $(LDFLAGS_EXTRA)
+		scope.c -o $@ -lcrypto $(LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(PAM_MODULE): pam_ocra_challenge.c ocra_core.c ocra_core.h ocra_suite.c \
 		ocra_suite.h secure_memory.c secure_memory.h secret_store.c \

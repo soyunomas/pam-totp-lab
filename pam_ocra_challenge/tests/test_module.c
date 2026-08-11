@@ -2,6 +2,7 @@
 
 #include "../rate_limit.h"
 #include "../secret_store.h"
+#include "../secure_memory.h"
 
 #include <assert.h>
 #include <pwd.h>
@@ -32,6 +33,9 @@ static char prompt_text[64];
 static unsigned int reserve_calls;
 static unsigned int reset_calls;
 static unsigned int fail_delay_calls;
+static int prompt_result = PAM_SUCCESS;
+static char *issued_response;
+static size_t response_wipe_length;
 
 int pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt)
 {
@@ -83,7 +87,8 @@ int pam_prompt(pam_handle_t *pamh, int style, char **response,
     va_end(arguments);
     assert(snprintf(prompt_text, sizeof(prompt_text), "%s", prompt) > 0);
     *response = strdup("75619513");
-    return *response == NULL ? PAM_SYSTEM_ERR : PAM_SUCCESS;
+    issued_response = *response;
+    return *response == NULL ? PAM_SYSTEM_ERR : prompt_result;
 }
 
 int pam_fail_delay(pam_handle_t *pamh, unsigned int delay)
@@ -135,6 +140,21 @@ void ocra_secret_record_clear(struct ocra_secret_record *record)
     }
 }
 
+void secure_memory_clear(void *buffer, size_t length)
+{
+    volatile unsigned char *cursor = buffer;
+
+    if (buffer == issued_response) {
+        response_wipe_length = length;
+    }
+    if (buffer == NULL) {
+        return;
+    }
+    while (length-- > 0U) {
+        *cursor++ = 0U;
+    }
+}
+
 static void test_correct_response_authenticates(void)
 {
     struct pam_handle handle = {0};
@@ -147,9 +167,22 @@ static void test_correct_response_authenticates(void)
     assert(fail_delay_calls == 0U);
 }
 
+static void test_conversation_error_clears_allocated_response(void)
+{
+    struct pam_handle handle = {0};
+
+    prompt_result = PAM_SYSTEM_ERR;
+    issued_response = NULL;
+    response_wipe_length = 0U;
+    assert(pam_sm_authenticate(&handle, 0, 0, NULL) == PAM_AUTH_ERR);
+    assert(response_wipe_length == OCRA_RESPONSE_DIGITS);
+    assert(fail_delay_calls == 1U);
+}
+
 int main(void)
 {
     test_correct_response_authenticates();
+    test_conversation_error_clears_allocated_response();
     puts("OCRA PAM module tests passed");
     return EXIT_SUCCESS;
 }
