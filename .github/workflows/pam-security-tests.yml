@@ -59,5 +59,8 @@ jobs:
             make -C pam_schedule_totp_override verify
           fi
 
+      - name: Verify OCRA challenge module
+        run: make -C pam_ocra_challenge verify
+
       - name: Run complete repository verification gate
         run: make -C tests verify

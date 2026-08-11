@@ -6,6 +6,10 @@ CFLAGS ?= -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic
 CFLAGS_EXTRA ?=
 LDFLAGS ?=
 LDFLAGS_EXTRA ?=
+HARDEN_CFLAGS ?= -fstack-protector-strong
+HARDEN_LDFLAGS ?= -Wl,-z,relro,-z,now
+PAM_DIR ?= /lib/$(shell $(CC) -dumpmachine)/security
+PREFIX ?= /usr/local
 
 BOOTSTRAP_TEST := $(BUILD_DIR)/test_bootstrap
 OCRA_CORE_TEST := $(BUILD_DIR)/test_ocra_core
@@ -37,7 +41,9 @@ DEVICE_TEST_IMAGE ?= postgres:15
 	compile-rate-limit-production test-client sanitize-client valgrind-client \
 	test-enroll test-enroll-owner sanitize-enroll valgrind-enroll smoke-enroll \
 	compile-enroll-production test-module compile-module-production integration \
-	gate-05 gate-06
+	integration-concurrent integration-negative sanitize-module valgrind-module \
+	analyze-module hardening-module install uninstall gate-05 gate-06 gate-07 gate-08 gate-09 \
+	verify verify-fast
 
 test-bootstrap: $(BOOTSTRAP_TEST)
 	$(BOOTSTRAP_TEST)
@@ -71,6 +77,8 @@ compile-module-production: $(PAM_MODULE)
 
 integration: $(INTEGRATION_MODULE) $(INTEGRATION_TEST)
 	OCRA_MODULE_BIN="$(abspath $(INTEGRATION_MODULE))" $(INTEGRATION_TEST)
+
+integration-concurrent integration-negative: integration
 
 test-enroll-owner: $(ENROLL_TEST)
 	docker run --rm --network none --cap-drop ALL --cap-add CHOWN \
@@ -200,9 +208,9 @@ $(OCRA_CLIENT): tools/ocra_client.c tools/ocra_client.h ocra_core.c \
 		ocra_core.h ocra_suite.c ocra_suite.h secret_store.c secret_store.h \
 		secure_memory.c secure_memory.h scope.c scope.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) tools/ocra_client.c \
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(HARDEN_CFLAGS) -fPIE $(CFLAGS_EXTRA) tools/ocra_client.c \
 		ocra_suite.c secure_memory.c ocra_core.c scope.c secret_store.c -o $@ \
-		-lcrypto $(LDFLAGS) $(LDFLAGS_EXTRA)
+		-lcrypto -pie $(HARDEN_LDFLAGS) $(LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(ENROLL_TEST): tests/test_enroll.c tools/ocra_enroll.c \
 		tools/ocra_enroll.h secret_store.c secret_store.h secure_memory.c \
@@ -219,10 +227,10 @@ $(OCRA_ENROLL): tools/ocra_enroll.c tools/ocra_enroll.h secret_store.c \
 		ocra_core.c ocra_core.h ocra_suite.c ocra_suite.h challenge.c \
 		challenge.h rate_limit.c rate_limit.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) tools/ocra_enroll.c \
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(HARDEN_CFLAGS) -fPIE $(CFLAGS_EXTRA) tools/ocra_enroll.c \
 		secret_store.c secure_memory.c scope.c ocra_core.c ocra_suite.c \
 		challenge.c rate_limit.c -o $@ -lcrypto $(LDFLAGS) \
-		$(LDFLAGS_EXTRA)
+		-pie $(HARDEN_LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(MODULE_TEST): tests/test_module.c pam_ocra_challenge.c \
 		tests/stubs/security/pam_modules.h \
@@ -234,31 +242,66 @@ $(MODULE_TEST): tests/test_module.c pam_ocra_challenge.c \
 		tests/test_module.c pam_ocra_challenge.c ocra_core.c ocra_suite.c \
 		scope.c -o $@ -lcrypto $(LDFLAGS) $(LDFLAGS_EXTRA)
 
-$(PAM_MODULE): pam_ocra_challenge.c ocra_core.c ocra_core.h ocra_suite.c \
+$(PAM_MODULE): pam_ocra_challenge.c pam_ocra_challenge.exports ocra_core.c ocra_core.h ocra_suite.c \
 		ocra_suite.h secure_memory.c secure_memory.h secret_store.c \
 		secret_store.h rate_limit.c rate_limit.h challenge.c challenge.h \
 		scope.c scope.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -fPIC -shared \
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(HARDEN_CFLAGS) $(CFLAGS_EXTRA) -fPIC -shared \
 		pam_ocra_challenge.c ocra_core.c ocra_suite.c secure_memory.c \
 		secret_store.c rate_limit.c challenge.c scope.c -o $@ -lpam -lcrypto \
-		-Wl,-z,relro,-z,now $(LDFLAGS) $(LDFLAGS_EXTRA)
+		$(HARDEN_LDFLAGS) -Wl,--version-script=pam_ocra_challenge.exports \
+		$(LDFLAGS) $(LDFLAGS_EXTRA)
 
 $(INTEGRATION_TEST): tests/test_integration.c
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) tests/test_integration.c \
 		-o $@ -lpam $(LDFLAGS) $(LDFLAGS_EXTRA)
 
-$(INTEGRATION_MODULE): pam_ocra_challenge.c tests/integration_backend.c \
+$(INTEGRATION_MODULE): pam_ocra_challenge.c pam_ocra_challenge.exports tests/integration_backend.c \
 		ocra_core.c ocra_core.h ocra_suite.c ocra_suite.h secure_memory.c \
 		secure_memory.h secret_store.h rate_limit.h challenge.h scope.c scope.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -fPIC -shared \
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(HARDEN_CFLAGS) $(CFLAGS_EXTRA) -fPIC -shared \
 		-Dgetpwnam_r=ocra_integration_getpwnam_r \
 		-Dpam_fail_delay=ocra_integration_fail_delay pam_ocra_challenge.c \
 		tests/integration_backend.c ocra_core.c ocra_suite.c secure_memory.c \
-		scope.c -o $@ -lpam -lcrypto -Wl,-z,relro,-z,now $(LDFLAGS) \
+		scope.c -o $@ -lpam -lcrypto $(HARDEN_LDFLAGS) \
+		-Wl,--version-script=pam_ocra_challenge.exports $(LDFLAGS) \
 		$(LDFLAGS_EXTRA)
+
+sanitize-module:
+	$(MAKE) CC=clang BUILD_DIR=build/asan-module \
+		CFLAGS_EXTRA='-O1 -fno-omit-frame-pointer -fsanitize=address,undefined' \
+		LDFLAGS_EXTRA='-fsanitize=address,undefined' test-module
+
+valgrind-module:
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc test-module
+	valgrind --leak-check=full --show-leak-kinds=all \
+		--errors-for-leak-kinds=all --error-exitcode=99 build/gcc/test_module
+
+analyze-module:
+	clang --analyze -Xanalyzer -analyzer-output=text \
+		$(CPPFLAGS) $(CFLAGS) $(HARDEN_CFLAGS) \
+		pam_ocra_challenge.c ocra_core.c ocra_suite.c secure_memory.c \
+		secret_store.c rate_limit.c challenge.c scope.c
+
+hardening-module: $(PAM_MODULE) $(OCRA_CLIENT) $(OCRA_ENROLL)
+	sh ../tests/test_elf_hardening.sh $(PAM_MODULE) $(OCRA_CLIENT) $(OCRA_ENROLL)
+	sh tests/test_module_exports.sh $(PAM_MODULE)
+
+install: $(PAM_MODULE) $(OCRA_CLIENT) $(OCRA_ENROLL)
+	install -d -o root -g root -m 0755 $(DESTDIR)$(PAM_DIR) $(DESTDIR)$(PREFIX)/bin
+	install -o root -g root -m 0644 $(PAM_MODULE) \
+		$(DESTDIR)$(PAM_DIR)/pam_ocra_challenge.so
+	install -o root -g root -m 0755 $(OCRA_CLIENT) $(DESTDIR)$(PREFIX)/bin/ocra-client
+	install -o root -g root -m 0755 $(OCRA_ENROLL) $(DESTDIR)$(PREFIX)/bin/ocra-enroll
+	install -d -o root -g root -m 0700 $(DESTDIR)/etc/security/pam-ocra/users
+	install -d -o root -g root -m 0700 $(DESTDIR)/run/pam-totp-lab/ocra
+
+uninstall:
+	$(RM) $(DESTDIR)$(PAM_DIR)/pam_ocra_challenge.so
+	$(RM) $(DESTDIR)$(PREFIX)/bin/ocra-client $(DESTDIR)$(PREFIX)/bin/ocra-enroll
 
 compile-enroll-production: $(OCRA_ENROLL)
 
@@ -409,6 +452,28 @@ gate-06: gate-05
 		test-enroll
 	$(MAKE) sanitize-enroll
 	$(MAKE) valgrind-enroll
+
+gate-07: gate-06
+	$(MAKE) clean
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc test-module compile-module-production
+	$(MAKE) CC=clang BUILD_DIR=build/clang test-module compile-module-production
+	$(MAKE) sanitize-module
+	$(MAKE) valgrind-module
+
+gate-08: gate-07
+	$(MAKE) integration integration-concurrent integration-negative
+	$(MAKE) -C ../tests verify
+
+gate-09: gate-08
+	$(MAKE) analyze-module
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc-production hardening-module
+	$(MAKE) CC=clang BUILD_DIR=build/clang-production hardening-module
+
+verify: gate-09
+
+verify-fast:
+	$(MAKE) CC=gcc BUILD_DIR=build/gcc-close test-module compile-module-production hardening-module
+	$(MAKE) CC=clang BUILD_DIR=build/clang-close test-module compile-module-production hardening-module
 
 clean:
 	$(RM) -r build
