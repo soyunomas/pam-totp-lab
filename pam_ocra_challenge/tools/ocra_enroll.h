@@ -28,6 +28,7 @@ enum ocra_enroll_fault_operation {
 typedef int (*ocra_enroll_random_provider)(void *buffer, size_t length);
 typedef int (*ocra_enroll_user_provider)(const char *name, uid_t *uid,
                                          gid_t *gid);
+typedef int (*ocra_enroll_qr_provider)(const char *uri, FILE *output);
 
 int ocra_enroll_run_at_for_tests(int argc, char *const argv[], FILE *input,
                                  FILE *output, FILE *error,
@@ -35,6 +36,7 @@ int ocra_enroll_run_at_for_tests(int argc, char *const argv[], FILE *input,
 void ocra_enroll_set_random_provider_for_tests(
     ocra_enroll_random_provider provider);
 void ocra_enroll_set_user_provider_for_tests(ocra_enroll_user_provider provider);
+void ocra_enroll_set_qr_provider_for_tests(ocra_enroll_qr_provider provider);
 void ocra_enroll_set_euid_for_tests(uid_t euid);
 void ocra_enroll_set_fault_for_tests(enum ocra_enroll_fault_operation operation,
                                      unsigned int occurrence);

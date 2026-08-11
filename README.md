@@ -23,7 +23,7 @@ El repositorio contiene trece implementaciones PAM y una herramienta auxiliar de
 | `pam_2man_totp` | Exige la autenticación secuencial de dos usuarios. | [README](./pam_2man_totp/README.md) |
 | `pam_schedule_totp_override` | Permite una excepción TOTP docente fuera del horario asignado. | [README](./pam_schedule_totp_override/README.md) |
 | `pam_schedule_partial_key_override` | Permite una excepción horaria mediante posiciones de una clave docente. | [README](./pam_schedule_partial_key_override/README.md) |
-| `pam_ocra_challenge` | Autenticación OCRA local con desafío de un solo uso por usuario y servicio. | [README](./pam_ocra_challenge/README.md) |
+| `pam_ocra_challenge` | Autenticación OCRA local con desafío de un solo uso y cliente Android propio. | [README](./pam_ocra_challenge/README.md) |
 
 ## 📂 Implementaciones
 
@@ -164,7 +164,7 @@ Implementa desafío-respuesta OCRA con suite fija `OCRA-1:HOTP-SHA256-8:QN10`.
 
 - Credenciales independientes por usuario y servicio.
 - Desafíos recientes no reutilizables y rate limiting concurrente.
-- Cliente y herramienta de alta, rotación y revocación incluidos.
+- Cliente de terminal, aplicación Android Flutter y herramienta de alta por QR, rotación y revocación incluidos.
 - Implementación completa; piloto manual pendiente y no aprobada para producción.
 - [Documentación](./pam_ocra_challenge/README.md)
 

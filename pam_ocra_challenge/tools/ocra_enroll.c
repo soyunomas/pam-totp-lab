@@ -24,6 +24,7 @@
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <openssl/crypto.h>
@@ -55,6 +56,7 @@ struct enroll_txn_directory {
 #ifdef OCRA_TESTING
 static ocra_enroll_random_provider test_random_provider;
 static ocra_enroll_user_provider test_user_provider;
+static ocra_enroll_qr_provider test_qr_provider;
 static uid_t test_euid;
 static int test_euid_is_set;
 static enum ocra_enroll_fault_operation test_fault_operation;
@@ -781,6 +783,149 @@ static void encode_base32(const unsigned char input[OCRA_SECRET_BYTES],
     }
     output[output_index] = '\0';
     secure_memory_clear(&accumulator, sizeof(accumulator));
+}
+
+static int uri_encode(const char *input, char *output, size_t capacity)
+{
+    static const char hexadecimal[] = "0123456789ABCDEF";
+    size_t used = 0U;
+
+    while (*input != '\0') {
+        unsigned char byte = (unsigned char)*input++;
+        int unreserved = (byte >= (unsigned char)'a' && byte <= (unsigned char)'z') ||
+                         (byte >= (unsigned char)'A' && byte <= (unsigned char)'Z') ||
+                         (byte >= (unsigned char)'0' && byte <= (unsigned char)'9') ||
+                         byte == (unsigned char)'-' || byte == (unsigned char)'.' ||
+                         byte == (unsigned char)'_' || byte == (unsigned char)'~';
+
+        if (unreserved != 0) {
+            if (used + 1U >= capacity) {
+                return -1;
+            }
+            output[used++] = (char)byte;
+        } else {
+            if (used + 3U >= capacity) {
+                return -1;
+            }
+            output[used++] = '%';
+            output[used++] = hexadecimal[byte >> 4U];
+            output[used++] = hexadecimal[byte & 0x0fU];
+        }
+    }
+    if (used >= capacity) {
+        return -1;
+    }
+    output[used] = '\0';
+    return 0;
+}
+
+static int write_all(int fd, const char *data, size_t length)
+{
+    size_t offset = 0U;
+
+    while (offset < length) {
+        ssize_t count = write(fd, data + offset, length - offset);
+
+        if (count > 0) {
+            offset += (size_t)count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int render_qr(const char *uri, FILE *output)
+{
+#ifdef OCRA_TESTING
+    if (test_qr_provider != NULL) {
+        return test_qr_provider(uri, output);
+    }
+#endif
+    int descriptors[2];
+    pid_t child;
+    int status;
+    int result = -1;
+
+    if (fflush(output) != 0 || pipe(descriptors) != 0) {
+        return -1;
+    }
+    child = fork();
+    if (child < 0) {
+        (void)close(descriptors[0]);
+        (void)close(descriptors[1]);
+        return -1;
+    }
+    if (child == 0) {
+        (void)close(descriptors[1]);
+        if (dup2(descriptors[0], STDIN_FILENO) < 0 ||
+            dup2(fileno(output), STDOUT_FILENO) < 0) {
+            _exit(126);
+        }
+        (void)close(descriptors[0]);
+        execl("/usr/bin/qrencode", "qrencode", "-t", "ANSIUTF8",
+              (char *)NULL);
+        _exit(127);
+    }
+    (void)close(descriptors[0]);
+    if (write_all(descriptors[1], uri, strlen(uri)) == 0 &&
+        write_all(descriptors[1], "\n", 1U) == 0 &&
+        close(descriptors[1]) == 0) {
+        descriptors[1] = -1;
+        do {
+            status = 0;
+        } while (waitpid(child, &status, 0) < 0 && errno == EINTR);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            result = 0;
+        }
+    }
+    if (descriptors[1] >= 0) {
+        (void)close(descriptors[1]);
+        (void)waitpid(child, &status, 0);
+    }
+    return result;
+}
+
+static int render_enrollment_qr(const struct ocra_secret_record *record,
+                                const char *user, const char *service,
+                                FILE *output)
+{
+    char host[256U];
+    char host_encoded[768U];
+    char user_encoded[768U];
+    char service_encoded[768U];
+    char secret[53U];
+    char uri[3072U];
+    int count;
+    int result = -1;
+
+    (void)memset(host, 0, sizeof(host));
+    (void)memset(secret, 0, sizeof(secret));
+    (void)memset(uri, 0, sizeof(uri));
+    if (gethostname(host, sizeof(host) - 1U) != 0 ||
+        uri_encode(host, host_encoded, sizeof(host_encoded)) != 0 ||
+        uri_encode(user, user_encoded, sizeof(user_encoded)) != 0 ||
+        uri_encode(service, service_encoded, sizeof(service_encoded)) != 0) {
+        goto cleanup;
+    }
+    encode_base32(record->secret, secret);
+    count = snprintf(uri, sizeof(uri),
+                     "pam-ocra://enroll?v=1&host=%s&user=%s&service=%s&suite="
+                     "OCRA-1%%3AHOTP-SHA256-8%%3AQN10&key_id=%s&secret=%s",
+                     host_encoded, user_encoded, service_encoded,
+                     record->key_id, secret);
+    if (count < 0 || (size_t)count >= sizeof(uri) ||
+        render_qr(uri, output) != 0) {
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    secure_memory_clear(secret, sizeof(secret));
+    secure_memory_clear(uri, sizeof(uri));
+    return result;
 }
 
 static void encode_key_id(const unsigned char input[OCRA_KEY_ID_RANDOM_BYTES],
@@ -1935,7 +2080,8 @@ cleanup:
 
 static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
                          gid_t gid, const char *uid_text, const char *service,
-                         const char *client_path, FILE *input, FILE *output)
+                         const char *user, const char *client_path,
+                         int qr_requested, FILE *input, FILE *output)
 {
     struct ocra_secret_record old_server;
     struct ocra_secret_record old_client;
@@ -2130,6 +2276,10 @@ static int enroll_rotate(int server_root_fd, int rate_root_fd, uid_t uid,
     client_installed = 1;
     if (inject_fault(OCRA_ENROLL_FAULT_INTERRUPT_AFTER_CLIENT) != 0) {
         leave_transaction = 1;
+        goto cleanup;
+    }
+    if (qr_requested != 0 &&
+        render_enrollment_qr(&fresh, user, service, output) != 0) {
         goto cleanup;
     }
     if (ocra_generate_challenge(challenge) != 0 ||
@@ -3099,7 +3249,8 @@ static int rollback_created_target(int directory_fd, const char *name)
 
 static int enroll_add(int server_root_fd, uid_t uid, gid_t gid,
                       const char *uid_text, const char *service,
-                      const char *client_path, FILE *output)
+                      const char *user, const char *client_path,
+                      int qr_requested, FILE *output)
 {
     unsigned char record[OCRA_RECORD_CAPACITY];
     char key_id[OCRA_KEY_ID_HEX_LENGTH + 1U];
@@ -3110,6 +3261,7 @@ static int enroll_add(int server_root_fd, uid_t uid, gid_t gid,
     struct enroll_target client;
     struct enroll_txn_directory client_transaction;
     struct add_journal journal;
+    struct ocra_secret_record fresh;
     size_t record_length = 0U;
     int server_fd = -1;
     int server_staged = 0;
@@ -3127,6 +3279,7 @@ static int enroll_add(int server_root_fd, uid_t uid, gid_t gid,
     (void)memset(key_id, 0, sizeof(key_id));
     (void)memset(transaction_id, 0, sizeof(transaction_id));
     (void)memset(&journal, 0, sizeof(journal));
+    ocra_secret_record_clear(&fresh);
     client.directory_fd = -1;
     client_transaction.fd = -1;
     if (snprintf(server_name, sizeof(server_name), "%s.conf", service) < 0 ||
@@ -3139,6 +3292,7 @@ static int enroll_add(int server_root_fd, uid_t uid, gid_t gid,
         !target_is_absent(server_fd, server_name) ||
         !target_is_absent(client.directory_fd, client.name) ||
         build_record(record, &record_length, key_id) != 0 ||
+        ocra_secret_record_parse(record, record_length, &fresh) != 0 ||
         digest_bytes(record, record_length, journal.new_digest) != 0 ||
         build_transaction_id(transaction_id) != 0 ||
         format_name(server_temp, server_name, "new", transaction_id) != 0 ||
@@ -3232,6 +3386,10 @@ static int enroll_add(int server_root_fd, uid_t uid, gid_t gid,
                                   journal.new_key, journal.new_digest)) {
         goto cleanup;
     }
+    if (qr_requested != 0 &&
+        render_enrollment_qr(&fresh, user, service, output) != 0) {
+        goto cleanup;
+    }
     persistence_status = write_add_journal(
         server_root_fd, OCRA_ADMIN_JOURNAL_NAME, &journal, "committing");
     if (persistence_status != 0) {
@@ -3298,6 +3456,7 @@ close_and_clear:
     secure_memory_clear(&journal, sizeof(journal));
     secure_memory_clear(transaction_id, sizeof(transaction_id));
     secure_memory_clear(key_id, sizeof(key_id));
+    ocra_secret_record_clear(&fresh);
     return result;
 }
 
@@ -3469,6 +3628,9 @@ static int enroll_run(int argc, char *const argv[], FILE *input, FILE *output,
     gid_t gid = (gid_t)0;
     int admin_lock_fd = -1;
     int count;
+    int option_index;
+    int qr_requested = 0;
+    int overwrite_requested = 0;
     int result = 1;
 
     (void)input;
@@ -3476,24 +3638,33 @@ static int enroll_run(int argc, char *const argv[], FILE *input, FILE *output,
     (void)memset(uid_text, 0, sizeof(uid_text));
     if (argv == NULL || input == NULL || output == NULL || error == NULL ||
         server_root_fd < 0 || rate_root_fd < 0 || enroll_euid() != (uid_t)0 ||
-        (argc != 6 && argc != 8 && argc != 9) || argv[1] == NULL ||
+        (argc < 6 || argc > 10) || argv[1] == NULL ||
         argv[2] == NULL ||
         strcmp(argv[2], "--user") != 0 || argv[3] == NULL ||
         argv[4] == NULL || strcmp(argv[4], "--service") != 0 ||
         argv[5] == NULL || ocra_scope_validate_service(argv[5]) != 0 ||
-        !(((argc == 8 || argc == 9) &&
+        !(((argc >= 8) &&
            (strcmp(argv[1], "add") == 0 ||
             strcmp(argv[1], "rotate") == 0) &&
            argv[6] != NULL && strcmp(argv[6], "--client-profile") == 0 &&
-           argv[7] != NULL &&
-           ((argc == 8) ||
-            (strcmp(argv[1], "add") == 0 && argv[8] != NULL &&
-             strcmp(argv[8], "--overwrite") == 0))) ||
+           argv[7] != NULL) ||
           (argc == 6 &&
            (strcmp(argv[1], "revoke") == 0 ||
             strcmp(argv[1], "inspect") == 0))) ||
         enroll_resolve_user(argv[3], &uid, &gid) != 0) {
         goto failure;
+    }
+    for (option_index = 8; option_index < argc; ++option_index) {
+        if (argv[option_index] != NULL &&
+            strcmp(argv[option_index], "--qr") == 0 && qr_requested == 0) {
+            qr_requested = 1;
+        } else if (argv[option_index] != NULL &&
+                   strcmp(argv[option_index], "--overwrite") == 0 &&
+                   strcmp(argv[1], "add") == 0 && overwrite_requested == 0) {
+            overwrite_requested = 1;
+        } else {
+            goto failure;
+        }
     }
     count = snprintf(uid_text, sizeof(uid_text), "%lu", (unsigned long)uid);
     if (count < 0 || (size_t)count >= sizeof(uid_text)) {
@@ -3505,17 +3676,19 @@ static int enroll_run(int argc, char *const argv[], FILE *input, FILE *output,
         goto failure;
     }
     if (strcmp(argv[1], "add") == 0) {
-        if ((argc == 8 &&
-             enroll_add(server_root_fd, uid, gid, uid_text, argv[5], argv[7],
-                        output) != 0) ||
-            (argc == 9 &&
+        if ((overwrite_requested == 0 &&
+             enroll_add(server_root_fd, uid, gid, uid_text, argv[5], argv[3],
+                        argv[7], qr_requested, output) != 0) ||
+            (overwrite_requested != 0 &&
              enroll_rotate(server_root_fd, rate_root_fd, uid, gid, uid_text,
-                           argv[5], argv[7], input, output) != 0)) {
+                           argv[5], argv[3], argv[7], qr_requested, input,
+                           output) != 0)) {
             goto failure;
         }
     } else if (strcmp(argv[1], "rotate") == 0) {
         if (enroll_rotate(server_root_fd, rate_root_fd, uid, gid, uid_text,
-                          argv[5], argv[7], input, output) != 0) {
+                          argv[5], argv[3], argv[7], qr_requested, input,
+                          output) != 0) {
             goto failure;
         }
     } else if (strcmp(argv[1], "revoke") == 0) {
@@ -3685,6 +3858,11 @@ void ocra_enroll_set_user_provider_for_tests(ocra_enroll_user_provider provider)
     test_user_provider = provider;
 }
 
+void ocra_enroll_set_qr_provider_for_tests(ocra_enroll_qr_provider provider)
+{
+    test_qr_provider = provider;
+}
+
 void ocra_enroll_set_euid_for_tests(uid_t euid)
 {
     test_euid = euid;
@@ -3730,6 +3908,7 @@ void ocra_enroll_reset_test_providers(void)
 {
     test_random_provider = NULL;
     test_user_provider = NULL;
+    test_qr_provider = NULL;
     test_euid = (uid_t)0;
     test_euid_is_set = 0;
     test_fault_operation = OCRA_ENROLL_FAULT_NONE;

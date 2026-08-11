@@ -1,8 +1,6 @@
 name: ocra_client
-description: "A new Flutter project."
-# The following line prevents the package from being accidentally published to
-# pub.dev using `flutter pub publish`. This is preferred for private packages.
-publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+description: "Cliente Android RFC 6287 para pam_ocra_challenge."
+publish_to: 'none'
 
 # The following defines the version and build number for your application.
 # A version number is three numbers separated by dots, like 1.2.43
@@ -35,7 +33,7 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   crypto: ^3.0.7
-  flutter_secure_storage: ^11.0.0
+  flutter_secure_storage: ^10.0.0
   mobile_scanner: ^7.4.0
 
 dev_dependencies:

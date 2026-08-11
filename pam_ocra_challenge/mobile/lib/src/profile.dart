@@ -67,8 +67,9 @@ class OcraProfile {
     }
     String field(String key) {
       final result = value[key];
-      if (result is! String)
+      if (result is! String) {
         throw const FormatException('Invalid stored profile');
+      }
       return result;
     }
 

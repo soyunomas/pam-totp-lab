@@ -1,17 +1,31 @@
-# ocra_client
+# OCRA Client para Android
 
-A new Flutter project.
+Cliente Flutter sin conexión para `pam_ocra_challenge`. Implementa RFC 6287
+con la suite fija `OCRA-1:HOTP-SHA256-8:QN10`, guarda varios perfiles en el
+almacén seguro de Android y solo acepta los QR emitidos por `ocra-enroll`.
 
-## Getting Started
+## Compilar e instalar
 
-This project is a starting point for a Flutter application.
+```bash
+cd pam_ocra_challenge/mobile
+flutter pub get
+flutter build apk --release
+adb install -r build/app/outputs/flutter-apk/app-release.apk
+```
 
-A few resources to get you started if this is your first Flutter project:
+También puede ejecutarse directamente en un teléfono conectado:
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```bash
+flutter run
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Uso
+
+1. En el servidor genera el QR con `ocra-enroll add ... --qr`.
+2. Abre **OCRA Client**, pulsa **Enrolar** y escanéalo.
+3. Al iniciar sesión por SSH, introduce en la app el desafío de 10 dígitos.
+4. Escribe en SSH la respuesta de 8 dígitos. La app la oculta a los 30 segundos.
+
+El QR contiene el secreto: escanéalo en privado y no lo fotografíes ni lo
+conserves. La aplicación no solicita permiso de red; la cámara solo se usa para
+el enrolamiento.

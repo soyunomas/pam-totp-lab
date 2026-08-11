@@ -388,6 +388,53 @@ static int run_add(struct enroll_fixture *fixture)
     return result;
 }
 
+static char captured_qr_uri[1024U];
+
+static int capture_qr_uri(const char *uri, FILE *output)
+{
+    (void)output;
+    if (snprintf(captured_qr_uri, sizeof(captured_qr_uri), "%s", uri) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static void test_add_qr_exports_mobile_enrollment_uri(void)
+{
+    struct enroll_fixture fixture;
+    char *arguments[] = {"ocra-enroll", "add", "--user", TEST_USER,
+                         "--service", TEST_SERVICE, "--client-profile", NULL,
+                         "--qr"};
+    FILE *input;
+    FILE *output;
+    FILE *error;
+
+    fixture_create(&fixture);
+    arguments[7] = fixture.profile_path;
+    captured_qr_uri[0] = '\0';
+    ocra_enroll_set_qr_provider_for_tests(capture_qr_uri);
+    input = tmpfile();
+    output = tmpfile();
+    error = tmpfile();
+    require(input != NULL && output != NULL && error != NULL,
+            "QR enrollment streams must be created");
+    require(ocra_enroll_run_at_for_tests(9, arguments, input, output, error,
+                                         fixture.server_fd,
+                                         fixture.rate_fd) == 0,
+            "add --qr must enroll and render a QR payload");
+    require(strncmp(captured_qr_uri, "pam-ocra://enroll?v=1&host=",
+                    strlen("pam-ocra://enroll?v=1&host=")) == 0 &&
+                strstr(captured_qr_uri, "&user=alice&service=sudo") != NULL &&
+                strstr(captured_qr_uri,
+                       "&suite=OCRA-1%3AHOTP-SHA256-8%3AQN10") != NULL &&
+                strstr(captured_qr_uri, "&key_id=") != NULL &&
+                strstr(captured_qr_uri, "&secret=") != NULL,
+            "QR payload must contain the strict mobile profile fields");
+    require(fclose(input) == 0 && fclose(output) == 0 && fclose(error) == 0,
+            "QR enrollment streams must close");
+    fixture_destroy(&fixture);
+}
+
 static int run_rotate_captured(struct enroll_fixture *fixture,
                                const char *response, char **stdout_text,
                                size_t *stdout_length, char **stderr_text,
@@ -2567,6 +2614,7 @@ static void test_recovery_fault_matrix_recalibrates_and_converges(void)
 
 int main(void)
 {
+    test_add_qr_exports_mobile_enrollment_uri();
     test_stream_capture_preserves_embedded_nul_length();
     test_admin_lock_cleanup_attempts_every_step_after_failures();
     test_add_recovers_crashes_inside_each_staged_write();
