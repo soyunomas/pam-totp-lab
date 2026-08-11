@@ -3,9 +3,12 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <security/pam_appl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 struct conversation_state {
@@ -115,7 +118,8 @@ static int write_policy(const char *directory, const char *module_path,
 }
 
 static int fixture_start(struct integration_fixture *fixture,
-                         const char *module_path, const char *control)
+                         const char *module_path, const char *control,
+                         const char *username)
 {
     static const char directory_template[] =
         "/tmp/ocra-pam-policy-XXXXXX";
@@ -133,7 +137,7 @@ static int fixture_start(struct integration_fixture *fixture,
         return -1;
     }
     fixture->last_result = pam_start_confdir(
-        "ocra-integration", "isolated-user", &fixture->conversation,
+        "ocra-integration", username, &fixture->conversation,
         fixture->directory, &fixture->handle);
     return fixture->last_result == PAM_SUCCESS ? 0 : -1;
 }
@@ -167,7 +171,8 @@ static int test_required_flow_and_rate_limit(const char *module_path)
     unsigned int attempt;
     int result = -1;
 
-    if (fixture_start(&fixture, module_path, "required") != 0) {
+    if (fixture_start(&fixture, module_path, "required", "isolated-user") !=
+        0) {
         fixture_destroy(&fixture);
         return -1;
     }
@@ -223,7 +228,8 @@ static int test_requisite_success(const char *module_path)
     struct integration_fixture fixture;
     int result = -1;
 
-    if (fixture_start(&fixture, module_path, "requisite") != 0) {
+    if (fixture_start(&fixture, module_path, "requisite", "isolated-user") !=
+        0) {
         fixture_destroy(&fixture);
         return -1;
     }
@@ -243,14 +249,143 @@ static int test_requisite_success(const char *module_path)
     return result;
 }
 
+static int test_concurrent_limit(const char *module_path)
+{
+    pid_t children[6U];
+    unsigned int allowed = 0U;
+    unsigned int blocked = 0U;
+    size_t index;
+
+    (void)memset(children, 0, sizeof(children));
+    for (index = 0U; index < sizeof(children) / sizeof(children[0]); ++index) {
+        pid_t child = fork();
+
+        if (child < 0) {
+            return -1;
+        }
+        if (child == 0) {
+            struct integration_fixture fixture;
+            int auth_result;
+            int exit_code = 12;
+
+            if (fixture_start(&fixture, module_path, "required",
+                              "isolated-user") == 0) {
+                auth_result =
+                    fixture_authenticate(&fixture, "00000000", 0);
+                if (auth_result == PAM_AUTH_ERR &&
+                    fixture.conversation_state.prompt_count == 1U) {
+                    exit_code = 10;
+                } else if (auth_result == PAM_AUTH_ERR &&
+                           fixture.conversation_state.prompt_count == 0U) {
+                    exit_code = 11;
+                }
+                fixture_destroy(&fixture);
+            }
+            _exit(exit_code);
+        }
+        children[index] = child;
+    }
+    for (index = 0U; index < sizeof(children) / sizeof(children[0]); ++index) {
+        int status;
+
+        if (waitpid(children[index], &status, 0) != children[index] ||
+            !WIFEXITED(status)) {
+            return -1;
+        }
+        if (WEXITSTATUS(status) == 10) {
+            allowed++;
+        } else if (WEXITSTATUS(status) == 11) {
+            blocked++;
+        } else {
+            return -1;
+        }
+    }
+    if (allowed != 5U || blocked != 1U) {
+        (void)fprintf(stderr,
+                      "concurrent integration failure: allowed=%u "
+                      "blocked=%u\n",
+                      allowed, blocked);
+        return -1;
+    }
+    return 0;
+}
+
+static int test_second_user_is_independent(const char *module_path)
+{
+    struct integration_fixture fixture;
+    int result = -1;
+
+    if (fixture_start(&fixture, module_path, "required",
+                      "isolated-user-two") != 0) {
+        fixture_destroy(&fixture);
+        return -1;
+    }
+    if (fixture_authenticate(&fixture, "00000000", 0) == PAM_AUTH_ERR &&
+        fixture.conversation_state.information_count == 1U &&
+        fixture.conversation_state.prompt_count == 1U) {
+        result = 0;
+    } else {
+        (void)fprintf(stderr,
+                      "user isolation failure: pam=%d info=%u prompt=%u\n",
+                      fixture.last_result,
+                      fixture.conversation_state.information_count,
+                      fixture.conversation_state.prompt_count);
+    }
+    fixture_destroy(&fixture);
+    return result;
+}
+
+static int reset_state_file(const char *path)
+{
+    uint32_t attempts[2U] = {UINT32_C(0), UINT32_C(0)};
+    int fd = open(path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
+    int result = -1;
+
+    if (fd >= 0 && pwrite(fd, &attempts, sizeof(attempts), 0) ==
+                       (ssize_t)sizeof(attempts) &&
+        fsync(fd) == 0) {
+        result = 0;
+    }
+    if (fd >= 0 && close(fd) != 0) {
+        result = -1;
+    }
+    return result;
+}
+
 int main(void)
 {
     const char *module_path = getenv("OCRA_MODULE_BIN");
+    char state_path[] = "/tmp/ocra-integration-state-XXXXXX";
+    int state_fd = -1;
+    int result = EXIT_FAILURE;
 
-    if (module_path == NULL || module_path[0] != '/' ||
-        test_required_flow_and_rate_limit(module_path) != 0 ||
-        test_requisite_success(module_path) != 0) {
-        return EXIT_FAILURE;
+    if (module_path == NULL || module_path[0] != '/') {
+        goto cleanup;
     }
-    return EXIT_SUCCESS;
+    state_fd = mkstemp(state_path);
+    if (state_fd < 0 || fchmod(state_fd, 0600) != 0 ||
+        ftruncate(state_fd, (off_t)(sizeof(uint32_t) * 2U)) != 0 ||
+        close(state_fd) != 0) {
+        goto cleanup;
+    }
+    state_fd = -1;
+    if (setenv("OCRA_INTEGRATION_STATE", state_path, 1) != 0 ||
+        reset_state_file(state_path) != 0 ||
+        test_required_flow_and_rate_limit(module_path) != 0 ||
+        reset_state_file(state_path) != 0 ||
+        test_requisite_success(module_path) != 0 ||
+        reset_state_file(state_path) != 0 ||
+        test_concurrent_limit(module_path) != 0 ||
+        test_second_user_is_independent(module_path) != 0) {
+        goto cleanup;
+    }
+    result = EXIT_SUCCESS;
+
+cleanup:
+    if (state_fd >= 0) {
+        (void)close(state_fd);
+    }
+    (void)unsetenv("OCRA_INTEGRATION_STATE");
+    (void)unlink(state_path);
+    return result;
 }
