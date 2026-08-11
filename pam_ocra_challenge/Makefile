@@ -19,6 +19,8 @@ CLIENT_TEST := $(BUILD_DIR)/test_client
 OCRA_CLIENT := $(BUILD_DIR)/ocra-client
 ENROLL_TEST := $(BUILD_DIR)/test_enroll
 OCRA_ENROLL := $(BUILD_DIR)/ocra-enroll
+MODULE_TEST := $(BUILD_DIR)/test_module
+PAM_MODULE := $(BUILD_DIR)/pam_ocra_challenge.so
 SECRET_STORE_PRODUCTION_OBJECTS := $(BUILD_DIR)/scope.production.o \
 	$(BUILD_DIR)/secret_store.production.o
 RATE_LIMIT_PRODUCTION_OBJECTS := $(BUILD_DIR)/scope.production.o \
@@ -32,7 +34,7 @@ DEVICE_TEST_IMAGE ?= postgres:15
 	test-rate-limit-owner test-concurrency sanitize-rate-limit valgrind-rate-limit \
 	compile-rate-limit-production test-client sanitize-client valgrind-client \
 	test-enroll test-enroll-owner sanitize-enroll valgrind-enroll smoke-enroll \
-	compile-enroll-production gate-05 gate-06
+	compile-enroll-production test-module compile-module-production gate-05 gate-06
 
 test-bootstrap: $(BOOTSTRAP_TEST)
 	$(BOOTSTRAP_TEST)
@@ -58,6 +60,11 @@ test-client: $(CLIENT_TEST) $(OCRA_CLIENT)
 
 test-enroll: $(ENROLL_TEST) $(OCRA_ENROLL)
 	$(ENROLL_TEST)
+
+test-module: $(MODULE_TEST)
+	$(MODULE_TEST)
+
+compile-module-production: $(PAM_MODULE)
 
 test-enroll-owner: $(ENROLL_TEST)
 	docker run --rm --network none --cap-drop ALL --cap-add CHOWN \
@@ -210,6 +217,26 @@ $(OCRA_ENROLL): tools/ocra_enroll.c tools/ocra_enroll.h secret_store.c \
 		secret_store.c secure_memory.c scope.c ocra_core.c ocra_suite.c \
 		challenge.c rate_limit.c -o $@ -lcrypto $(LDFLAGS) \
 		$(LDFLAGS_EXTRA)
+
+$(MODULE_TEST): tests/test_module.c pam_ocra_challenge.c \
+		tests/stubs/security/pam_modules.h \
+		tests/stubs/security/pam_ext.h ocra_core.c ocra_core.h ocra_suite.c \
+		ocra_suite.h secure_memory.c secure_memory.h secret_store.h \
+		rate_limit.h scope.c scope.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -Itests/stubs \
+		tests/test_module.c pam_ocra_challenge.c ocra_core.c ocra_suite.c \
+		secure_memory.c scope.c -o $@ -lcrypto $(LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(PAM_MODULE): pam_ocra_challenge.c ocra_core.c ocra_core.h ocra_suite.c \
+		ocra_suite.h secure_memory.c secure_memory.h secret_store.c \
+		secret_store.h rate_limit.c rate_limit.h challenge.c challenge.h \
+		scope.c scope.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -fPIC -shared \
+		pam_ocra_challenge.c ocra_core.c ocra_suite.c secure_memory.c \
+		secret_store.c rate_limit.c challenge.c scope.c -o $@ -lpam -lcrypto \
+		-Wl,-z,relro,-z,now $(LDFLAGS) $(LDFLAGS_EXTRA)
 
 compile-enroll-production: $(OCRA_ENROLL)
 
