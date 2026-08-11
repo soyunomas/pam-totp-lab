@@ -254,7 +254,8 @@ $(INTEGRATION_MODULE): pam_ocra_challenge.c tests/integration_backend.c \
 		secure_memory.h secret_store.h rate_limit.h challenge.h scope.c scope.h
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -fPIC -shared \
-		-Dgetpwnam_r=ocra_integration_getpwnam_r pam_ocra_challenge.c \
+		-Dgetpwnam_r=ocra_integration_getpwnam_r \
+		-Dpam_fail_delay=ocra_integration_fail_delay pam_ocra_challenge.c \
 		tests/integration_backend.c ocra_core.c ocra_suite.c secure_memory.c \
 		scope.c -o $@ -lpam -lcrypto -Wl,-z,relro,-z,now $(LDFLAGS) \
 		$(LDFLAGS_EXTRA)

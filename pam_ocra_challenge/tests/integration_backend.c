@@ -3,11 +3,21 @@
 #include "../secure_memory.h"
 
 #include <pwd.h>
+#include <security/pam_modules.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/types.h>
 
 #define INTEGRATION_UID ((uid_t)4242)
+
+static unsigned int reserved_attempts;
+
+int ocra_integration_fail_delay(pam_handle_t *handle, unsigned int delay)
+{
+    (void)handle;
+    (void)delay;
+    return PAM_SUCCESS;
+}
 
 int ocra_integration_getpwnam_r(const char *name, struct passwd *entry,
                                 char *buffer, size_t buffer_length,
@@ -59,18 +69,22 @@ int ocra_rate_limit_reserve(uid_t uid, const char *service,
 {
     if (uid != INTEGRATION_UID || service == NULL || key_id == NULL ||
         challenge == NULL || strcmp(service, "ocra-integration") != 0 ||
-        strcmp(key_id, "0011223344556677") != 0) {
+        strcmp(key_id, "0011223344556677") != 0 ||
+        reserved_attempts >= 5U) {
         return -1;
     }
+    reserved_attempts++;
     (void)memcpy(challenge, "1234567890", OCRA_CHALLENGE_DIGITS + 1U);
     return 0;
 }
 
 int ocra_rate_limit_reset(uid_t uid, const char *service, const char *key_id)
 {
-    return uid == INTEGRATION_UID && service != NULL && key_id != NULL &&
-                   strcmp(service, "ocra-integration") == 0 &&
-                   strcmp(key_id, "0011223344556677") == 0
-               ? 0
-               : -1;
+    if (uid != INTEGRATION_UID || service == NULL || key_id == NULL ||
+        strcmp(service, "ocra-integration") != 0 ||
+        strcmp(key_id, "0011223344556677") != 0) {
+        return -1;
+    }
+    reserved_attempts = 0U;
+    return 0;
 }
