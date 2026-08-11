@@ -85,7 +85,8 @@ static int scripted_conversation(int count,
 }
 
 static int write_policy(const char *directory, const char *module_path,
-                        const char *control, char policy_path[PATH_MAX])
+                        const char *control, const char *service,
+                        char policy_path[PATH_MAX])
 {
     char policy[PATH_MAX + 32U];
     int policy_length;
@@ -93,8 +94,8 @@ static int write_policy(const char *directory, const char *module_path,
     int fd;
     int result = -1;
 
-    path_length = snprintf(policy_path, PATH_MAX, "%s/ocra-integration",
-                           directory);
+    path_length = snprintf(policy_path, PATH_MAX, "%s/%s", directory,
+                           service);
     policy_length = snprintf(policy, sizeof(policy), "auth %s %s\n", control,
                              module_path);
     if (path_length < 0 || path_length >= PATH_MAX || policy_length < 0 ||
@@ -119,7 +120,7 @@ static int write_policy(const char *directory, const char *module_path,
 
 static int fixture_start(struct integration_fixture *fixture,
                          const char *module_path, const char *control,
-                         const char *username)
+                         const char *service, const char *username)
 {
     static const char directory_template[] =
         "/tmp/ocra-pam-policy-XXXXXX";
@@ -132,12 +133,12 @@ static int fixture_start(struct integration_fixture *fixture,
     fixture->conversation.appdata_ptr = &fixture->conversation_state;
     fixture->last_result = PAM_SYSTEM_ERR;
     if (mkdtemp(fixture->directory) == NULL ||
-        write_policy(fixture->directory, module_path, control,
+        write_policy(fixture->directory, module_path, control, service,
                      fixture->policy_path) != 0) {
         return -1;
     }
     fixture->last_result = pam_start_confdir(
-        "ocra-integration", username, &fixture->conversation,
+        service, username, &fixture->conversation,
         fixture->directory, &fixture->handle);
     return fixture->last_result == PAM_SUCCESS ? 0 : -1;
 }
@@ -171,8 +172,8 @@ static int test_required_flow_and_rate_limit(const char *module_path)
     unsigned int attempt;
     int result = -1;
 
-    if (fixture_start(&fixture, module_path, "required", "isolated-user") !=
-        0) {
+    if (fixture_start(&fixture, module_path, "required", "ocra-integration",
+                      "isolated-user") != 0) {
         fixture_destroy(&fixture);
         return -1;
     }
@@ -228,8 +229,8 @@ static int test_requisite_success(const char *module_path)
     struct integration_fixture fixture;
     int result = -1;
 
-    if (fixture_start(&fixture, module_path, "requisite", "isolated-user") !=
-        0) {
+    if (fixture_start(&fixture, module_path, "requisite", "ocra-integration",
+                      "isolated-user") != 0) {
         fixture_destroy(&fixture);
         return -1;
     }
@@ -269,6 +270,7 @@ static int test_concurrent_limit(const char *module_path)
             int exit_code = 12;
 
             if (fixture_start(&fixture, module_path, "required",
+                              "ocra-integration",
                               "isolated-user") == 0) {
                 auth_result =
                     fixture_authenticate(&fixture, "00000000", 0);
@@ -315,7 +317,7 @@ static int test_second_user_is_independent(const char *module_path)
     struct integration_fixture fixture;
     int result = -1;
 
-    if (fixture_start(&fixture, module_path, "required",
+    if (fixture_start(&fixture, module_path, "required", "ocra-integration",
                       "isolated-user-two") != 0) {
         fixture_destroy(&fixture);
         return -1;
@@ -335,9 +337,39 @@ static int test_second_user_is_independent(const char *module_path)
     return result;
 }
 
+static int test_second_service_is_independent(const char *module_path)
+{
+    struct integration_fixture fixture;
+    int result = -1;
+
+    if (fixture_start(&fixture, module_path, "required", "ocra-secondary",
+                      "isolated-user") != 0) {
+        fixture_destroy(&fixture);
+        return -1;
+    }
+    if (fixture_authenticate(&fixture, "75619513", 0) != PAM_AUTH_ERR ||
+        fixture.conversation_state.information_count != 1U ||
+        fixture.conversation_state.prompt_count != 1U ||
+        fixture_authenticate(&fixture, "47914048", 0) != PAM_SUCCESS) {
+        (void)fprintf(stderr,
+                      "service isolation failure: pam=%d info=%u prompt=%u\n",
+                      fixture.last_result,
+                      fixture.conversation_state.information_count,
+                      fixture.conversation_state.prompt_count);
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    fixture_destroy(&fixture);
+    return result;
+}
+
 static int reset_state_file(const char *path)
 {
-    uint32_t attempts[2U] = {UINT32_C(0), UINT32_C(0)};
+    uint32_t attempts[4U] = {
+        UINT32_C(0), UINT32_C(0), UINT32_C(0), UINT32_C(0),
+    };
     int fd = open(path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
     int result = -1;
 
@@ -364,7 +396,7 @@ int main(void)
     }
     state_fd = mkstemp(state_path);
     if (state_fd < 0 || fchmod(state_fd, 0600) != 0 ||
-        ftruncate(state_fd, (off_t)(sizeof(uint32_t) * 2U)) != 0 ||
+        ftruncate(state_fd, (off_t)(sizeof(uint32_t) * 4U)) != 0 ||
         close(state_fd) != 0) {
         goto cleanup;
     }
@@ -376,6 +408,7 @@ int main(void)
         test_requisite_success(module_path) != 0 ||
         reset_state_file(state_path) != 0 ||
         test_concurrent_limit(module_path) != 0 ||
+        test_second_service_is_independent(module_path) != 0 ||
         test_second_user_is_independent(module_path) != 0) {
         goto cleanup;
     }

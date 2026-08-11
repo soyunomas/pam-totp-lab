@@ -18,7 +18,10 @@
 
 #define INTEGRATION_UID ((uid_t)4242)
 #define INTEGRATION_SECOND_UID ((uid_t)4243)
-#define INTEGRATION_SCOPE_COUNT 2U
+#define INTEGRATION_USER_COUNT 2U
+#define INTEGRATION_SERVICE_COUNT 2U
+#define INTEGRATION_SCOPE_COUNT \
+    (INTEGRATION_USER_COUNT * INTEGRATION_SERVICE_COUNT)
 
 int ocra_integration_fail_delay(pam_handle_t *handle, unsigned int delay)
 {
@@ -50,7 +53,7 @@ static int open_state(void)
     return fd;
 }
 
-static int scope_index(uid_t uid, size_t *index)
+static int user_index(uid_t uid, size_t *index)
 {
     if (uid == INTEGRATION_UID) {
         *index = 0U;
@@ -63,14 +66,40 @@ static int scope_index(uid_t uid, size_t *index)
     return -1;
 }
 
-static int reserve_attempt(uid_t uid)
+static int service_index(const char *service, size_t *index)
+{
+    if (strcmp(service, "ocra-integration") == 0) {
+        *index = 0U;
+        return 0;
+    }
+    if (strcmp(service, "ocra-secondary") == 0) {
+        *index = 1U;
+        return 0;
+    }
+    return -1;
+}
+
+static int scope_index(uid_t uid, const char *service, size_t *index)
+{
+    size_t selected_user;
+    size_t selected_service;
+
+    if (user_index(uid, &selected_user) != 0 ||
+        service_index(service, &selected_service) != 0) {
+        return -1;
+    }
+    *index = (selected_user * INTEGRATION_SERVICE_COUNT) + selected_service;
+    return 0;
+}
+
+static int reserve_attempt(uid_t uid, const char *service)
 {
     uint32_t attempts[INTEGRATION_SCOPE_COUNT];
     size_t index;
     int fd = open_state();
     int result = -1;
 
-    if (scope_index(uid, &index) != 0 || fd < 0 ||
+    if (scope_index(uid, service, &index) != 0 || fd < 0 ||
         flock(fd, LOCK_EX) != 0 ||
         pread(fd, &attempts, sizeof(attempts), 0) !=
             (ssize_t)sizeof(attempts)) {
@@ -97,14 +126,14 @@ cleanup:
     return result;
 }
 
-static int reset_attempts(uid_t uid)
+static int reset_attempts(uid_t uid, const char *service)
 {
     uint32_t attempts[INTEGRATION_SCOPE_COUNT];
     size_t index;
     int fd = open_state();
     int result = -1;
 
-    if (scope_index(uid, &index) == 0 && fd >= 0 &&
+    if (scope_index(uid, service, &index) == 0 && fd >= 0 &&
         flock(fd, LOCK_EX) == 0 &&
         pread(fd, &attempts, sizeof(attempts), 0) ==
             (ssize_t)sizeof(attempts) &&
@@ -153,17 +182,26 @@ int ocra_integration_getpwnam_r(const char *name, struct passwd *entry,
 int ocra_secret_store_load(uid_t uid, const char *service,
                            struct ocra_secret_record *record)
 {
-    static const unsigned char secret[] =
+    static const unsigned char primary_secret[] =
         "12345678901234567890123456789012";
+    static const unsigned char secondary_secret[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
 
     if ((uid != INTEGRATION_UID && uid != INTEGRATION_SECOND_UID) ||
-        service == NULL ||
-        strcmp(service, "ocra-integration") != 0 || record == NULL) {
+        service == NULL || record == NULL) {
         return -1;
     }
-    (void)memcpy(record->secret, secret, OCRA_SECRET_BYTES);
-    (void)memcpy(record->key_id, "0011223344556677",
-                 OCRA_KEY_ID_HEX_LENGTH + 1U);
+    if (strcmp(service, "ocra-integration") == 0) {
+        (void)memcpy(record->secret, primary_secret, OCRA_SECRET_BYTES);
+        (void)memcpy(record->key_id, "0011223344556677",
+                     OCRA_KEY_ID_HEX_LENGTH + 1U);
+    } else if (strcmp(service, "ocra-secondary") == 0) {
+        (void)memcpy(record->secret, secondary_secret, OCRA_SECRET_BYTES);
+        (void)memcpy(record->key_id, "8899aabbccddeeff",
+                     OCRA_KEY_ID_HEX_LENGTH + 1U);
+    } else {
+        return -1;
+    }
     return 0;
 }
 
@@ -178,29 +216,51 @@ int ocra_rate_limit_reserve(uid_t uid, const char *service,
                             const char *key_id,
                             char challenge[OCRA_CHALLENGE_DIGITS + 1U])
 {
+    const char *expected_key;
+    const char *selected_challenge;
     int reservation;
 
     if ((uid != INTEGRATION_UID && uid != INTEGRATION_SECOND_UID) ||
-        service == NULL || key_id == NULL || challenge == NULL ||
-        strcmp(service, "ocra-integration") != 0 ||
-        strcmp(key_id, "0011223344556677") != 0) {
+        service == NULL || key_id == NULL || challenge == NULL) {
         return -1;
     }
-    reservation = reserve_attempt(uid);
+    if (strcmp(service, "ocra-integration") == 0) {
+        expected_key = "0011223344556677";
+        selected_challenge = "1234567890";
+    } else if (strcmp(service, "ocra-secondary") == 0) {
+        expected_key = "8899aabbccddeeff";
+        selected_challenge = "0000000001";
+    } else {
+        return -1;
+    }
+    if (strcmp(key_id, expected_key) != 0) {
+        return -1;
+    }
+    reservation = reserve_attempt(uid, service);
     if (reservation != 1) {
         return -1;
     }
-    (void)memcpy(challenge, "1234567890", OCRA_CHALLENGE_DIGITS + 1U);
+    (void)memcpy(challenge, selected_challenge,
+                 OCRA_CHALLENGE_DIGITS + 1U);
     return 0;
 }
 
 int ocra_rate_limit_reset(uid_t uid, const char *service, const char *key_id)
 {
+    const char *expected_key;
+
     if ((uid != INTEGRATION_UID && uid != INTEGRATION_SECOND_UID) ||
-        service == NULL || key_id == NULL ||
-        strcmp(service, "ocra-integration") != 0 ||
-        strcmp(key_id, "0011223344556677") != 0) {
+        service == NULL || key_id == NULL) {
         return -1;
     }
-    return reset_attempts(uid);
+    if (strcmp(service, "ocra-integration") == 0) {
+        expected_key = "0011223344556677";
+    } else if (strcmp(service, "ocra-secondary") == 0) {
+        expected_key = "8899aabbccddeeff";
+    } else {
+        return -1;
+    }
+    return strcmp(key_id, expected_key) == 0
+               ? reset_attempts(uid, service)
+               : -1;
 }
