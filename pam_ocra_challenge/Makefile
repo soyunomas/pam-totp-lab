@@ -21,6 +21,8 @@ ENROLL_TEST := $(BUILD_DIR)/test_enroll
 OCRA_ENROLL := $(BUILD_DIR)/ocra-enroll
 MODULE_TEST := $(BUILD_DIR)/test_module
 PAM_MODULE := $(BUILD_DIR)/pam_ocra_challenge.so
+INTEGRATION_TEST := $(BUILD_DIR)/test_integration
+INTEGRATION_MODULE := $(BUILD_DIR)/pam_ocra_challenge.integration.so
 SECRET_STORE_PRODUCTION_OBJECTS := $(BUILD_DIR)/scope.production.o \
 	$(BUILD_DIR)/secret_store.production.o
 RATE_LIMIT_PRODUCTION_OBJECTS := $(BUILD_DIR)/scope.production.o \
@@ -34,7 +36,8 @@ DEVICE_TEST_IMAGE ?= postgres:15
 	test-rate-limit-owner test-concurrency sanitize-rate-limit valgrind-rate-limit \
 	compile-rate-limit-production test-client sanitize-client valgrind-client \
 	test-enroll test-enroll-owner sanitize-enroll valgrind-enroll smoke-enroll \
-	compile-enroll-production test-module compile-module-production gate-05 gate-06
+	compile-enroll-production test-module compile-module-production integration \
+	gate-05 gate-06
 
 test-bootstrap: $(BOOTSTRAP_TEST)
 	$(BOOTSTRAP_TEST)
@@ -65,6 +68,9 @@ test-module: $(MODULE_TEST)
 	$(MODULE_TEST)
 
 compile-module-production: $(PAM_MODULE)
+
+integration: $(INTEGRATION_MODULE) $(INTEGRATION_TEST)
+	OCRA_MODULE_BIN="$(abspath $(INTEGRATION_MODULE))" $(INTEGRATION_TEST)
 
 test-enroll-owner: $(ENROLL_TEST)
 	docker run --rm --network none --cap-drop ALL --cap-add CHOWN \
@@ -237,6 +243,21 @@ $(PAM_MODULE): pam_ocra_challenge.c ocra_core.c ocra_core.h ocra_suite.c \
 		pam_ocra_challenge.c ocra_core.c ocra_suite.c secure_memory.c \
 		secret_store.c rate_limit.c challenge.c scope.c -o $@ -lpam -lcrypto \
 		-Wl,-z,relro,-z,now $(LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(INTEGRATION_TEST): tests/test_integration.c
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) tests/test_integration.c \
+		-o $@ -lpam $(LDFLAGS) $(LDFLAGS_EXTRA)
+
+$(INTEGRATION_MODULE): pam_ocra_challenge.c tests/integration_backend.c \
+		ocra_core.c ocra_core.h ocra_suite.c ocra_suite.h secure_memory.c \
+		secure_memory.h secret_store.h rate_limit.h challenge.h scope.c scope.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_EXTRA) -fPIC -shared \
+		-Dgetpwnam_r=ocra_integration_getpwnam_r pam_ocra_challenge.c \
+		tests/integration_backend.c ocra_core.c ocra_suite.c secure_memory.c \
+		scope.c -o $@ -lpam -lcrypto -Wl,-z,relro,-z,now $(LDFLAGS) \
+		$(LDFLAGS_EXTRA)
 
 compile-enroll-production: $(OCRA_ENROLL)
 
